@@ -11,7 +11,7 @@ Requirements:
 """
 
 import customtkinter as ctk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 import threading
 import json
 from pathlib import Path
@@ -626,19 +626,46 @@ class KeyRemapperGUI(ctk.CTk):
             self.stop_btn.configure(state="disabled")
     
     def _save_config(self):
-        """Save configuration"""
-        if self.remapper.save_config():
-            messagebox.showinfo("Saved", f"Configuration saved to:\n{CONFIG_FILE}")
-        else:
-            messagebox.showerror("Error", "Failed to save configuration.")
+        """Save configuration with file dialog"""
+        # Get default directory (user's Documents folder)
+        default_dir = Path.home() / "Documents"
+        
+        filepath = filedialog.asksaveasfilename(
+            title="Save Configuration",
+            initialdir=default_dir,
+            initialfile="key_remap_config.json",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        
+        if filepath:
+            filepath = Path(filepath)
+            if self.remapper.save_config(filepath):
+                self.config_label.configure(text=f"Config: {filepath.name}")
+                messagebox.showinfo("Saved", f"Configuration saved to:\n{filepath}")
+            else:
+                messagebox.showerror("Error", "Failed to save configuration.")
     
     def _load_config(self):
-        """Load configuration"""
-        if self.remapper.load_config():
-            self._refresh_lists()
-            messagebox.showinfo("Loaded", "Configuration loaded successfully.")
-        else:
-            messagebox.showwarning("Warning", "No configuration file found or failed to load.")
+        """Load configuration with file dialog"""
+        # Get default directory (user's Documents folder)
+        default_dir = Path.home() / "Documents"
+        
+        filepath = filedialog.askopenfilename(
+            title="Load Configuration",
+            initialdir=default_dir,
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        
+        if filepath:
+            filepath = Path(filepath)
+            if self.remapper.load_config(filepath):
+                self._refresh_lists()
+                self.config_label.configure(text=f"Config: {filepath.name}")
+                messagebox.showinfo("Loaded", f"Configuration loaded from:\n{filepath}")
+            else:
+                messagebox.showerror("Error", "Failed to load configuration.")
     
     def _show_available_keys(self):
         """Show available key names"""

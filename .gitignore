@@ -1,0 +1,38 @@
+# Build artifacts
+build/
+dist/
+*.spec
+*.exe
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Config (user-specific)
+key_remap_config.json
+
+# Virtual environment
+venv/
+env/
+.env/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Icon (generated)
+icon.ico

@@ -2,6 +2,10 @@
 
 A robust, gaming-compatible key remapping tool for Windows 11 (also works on Windows 10).
 
+Compiled .exe file can be downloaded directly here https://drive.google.com/file/d/1kUUBALFeoGf7AmNjgbKAfZfchaMKC_GV/view?usp=sharing
+
+Make sure to right click and "Run as Admin" if it's not working right in your particular application/game.
+
 **Version 1.0** | Built by Li Fan, 2025
 
 > *Created out of frustration at being unable to disable or remap keys within a particular game.*

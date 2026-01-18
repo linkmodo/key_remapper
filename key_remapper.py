@@ -25,18 +25,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable, Set, Tuple
 from pathlib import Path
 from enum import IntEnum
-import logging
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('key_remapper.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
 # Windows API Constants
 WH_KEYBOARD_LL = 13
@@ -173,6 +161,10 @@ KEY_NAME_TO_VK: Dict[str, int] = {
     'f4': VirtualKey.VK_F4, 'f5': VirtualKey.VK_F5, 'f6': VirtualKey.VK_F6,
     'f7': VirtualKey.VK_F7, 'f8': VirtualKey.VK_F8, 'f9': VirtualKey.VK_F9,
     'f10': VirtualKey.VK_F10, 'f11': VirtualKey.VK_F11, 'f12': VirtualKey.VK_F12,
+    'f13': VirtualKey.VK_F13, 'f14': VirtualKey.VK_F14, 'f15': VirtualKey.VK_F15,
+    'f16': VirtualKey.VK_F16, 'f17': VirtualKey.VK_F17, 'f18': VirtualKey.VK_F18,
+    'f19': VirtualKey.VK_F19, 'f20': VirtualKey.VK_F20, 'f21': VirtualKey.VK_F21,
+    'f22': VirtualKey.VK_F22, 'f23': VirtualKey.VK_F23, 'f24': VirtualKey.VK_F24,
     # Modifiers
     'shift': VirtualKey.VK_SHIFT, 'lshift': VirtualKey.VK_LSHIFT, 'rshift': VirtualKey.VK_RSHIFT,
     'ctrl': VirtualKey.VK_CONTROL, 'lctrl': VirtualKey.VK_LCONTROL, 'rctrl': VirtualKey.VK_RCONTROL,
@@ -420,11 +412,9 @@ class KeyRemapper:
             with self._lock:
                 self.mappings[source_keys] = mapping
             
-            logger.info(f"Added mapping: {self.vk_to_string(source_keys)} -> {self.vk_to_string(target_keys)}")
             return True
             
-        except ValueError as e:
-            logger.error(f"Failed to add mapping: {e}")
+        except ValueError:
             return False
     
     def remove_mapping(self, source: str) -> bool:
@@ -435,14 +425,11 @@ class KeyRemapper:
             with self._lock:
                 if source_keys in self.mappings:
                     del self.mappings[source_keys]
-                    logger.info(f"Removed mapping for: {self.vk_to_string(source_keys)}")
                     return True
                 else:
-                    logger.warning(f"No mapping found for: {source}")
                     return False
                     
-        except ValueError as e:
-            logger.error(f"Failed to remove mapping: {e}")
+        except ValueError:
             return False
     
     def toggle_mapping(self, source: str) -> bool:
@@ -453,8 +440,6 @@ class KeyRemapper:
             with self._lock:
                 if source_keys in self.mappings:
                     self.mappings[source_keys].enabled = not self.mappings[source_keys].enabled
-                    status = "enabled" if self.mappings[source_keys].enabled else "disabled"
-                    logger.info(f"Mapping {self.vk_to_string(source_keys)} {status}")
                     return True
                 return False
                 
@@ -484,11 +469,9 @@ class KeyRemapper:
             with self._lock:
                 self.blocked_keys[key_codes] = blocked
             
-            logger.info(f"Blocked key: {self.vk_to_string(key_codes)}")
             return True
             
-        except ValueError as e:
-            logger.error(f"Failed to block key: {e}")
+        except ValueError:
             return False
     
     def unblock_key(self, key: str) -> bool:
@@ -499,14 +482,11 @@ class KeyRemapper:
             with self._lock:
                 if key_codes in self.blocked_keys:
                     del self.blocked_keys[key_codes]
-                    logger.info(f"Unblocked key: {self.vk_to_string(key_codes)}")
                     return True
                 else:
-                    logger.warning(f"Key not blocked: {key}")
                     return False
                     
-        except ValueError as e:
-            logger.error(f"Failed to unblock key: {e}")
+        except ValueError:
             return False
     
     def toggle_blocked_key(self, key: str) -> bool:
@@ -517,8 +497,6 @@ class KeyRemapper:
             with self._lock:
                 if key_codes in self.blocked_keys:
                     self.blocked_keys[key_codes].enabled = not self.blocked_keys[key_codes].enabled
-                    status = "enabled" if self.blocked_keys[key_codes].enabled else "disabled"
-                    logger.info(f"Blocked key {self.vk_to_string(key_codes)} {status}")
                     return True
                 return False
                 
@@ -556,10 +534,7 @@ class KeyRemapper:
         inp.union.ki.time = 0
         inp.union.ki.dwExtraInfo = self._injection_marker
         
-        result = user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-        if result != 1:
-            error = kernel32.GetLastError()
-            logger.warning(f"SendInput failed for VK {vk_code}, error: {error}")
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
     
     def _send_key_combination(self, vk_codes: Tuple[int, ...], key_up: bool = False):
         """Send a key combination"""
@@ -658,8 +633,8 @@ class KeyRemapper:
                     self._send_key_combination(mapping.target_keys, key_up=True)
                     return 1  # Block original key
             
-        except Exception as e:
-            logger.error(f"Error in keyboard callback: {e}")
+        except Exception:
+            pass
         
         return user32.CallNextHookEx(self.hook_handle, nCode, wParam, lParam)
     
@@ -679,11 +654,9 @@ class KeyRemapper:
     def start(self) -> bool:
         """Start the key remapper"""
         if self.running:
-            logger.warning("Remapper is already running")
             return False
         
         if not self.mappings and not self.blocked_keys:
-            logger.warning("No mappings or blocked keys configured")
             return False
         
         try:
@@ -699,8 +672,6 @@ class KeyRemapper:
             )
             
             if not self.hook_handle:
-                error = kernel32.GetLastError()
-                logger.error(f"Failed to install keyboard hook, error: {error}")
                 return False
             
             self.running = True
@@ -709,11 +680,9 @@ class KeyRemapper:
             self.message_thread = threading.Thread(target=self._message_loop, daemon=True)
             self.message_thread.start()
             
-            logger.info("Key remapper started successfully")
             return True
             
-        except Exception as e:
-            logger.error(f"Failed to start remapper: {e}")
+        except Exception:
             return False
     
     def stop(self):
@@ -738,7 +707,6 @@ class KeyRemapper:
             self.hook_handle = None
         
         self.state = RemapperState()
-        logger.info("Key remapper stopped")
     
     def save_config(self, filepath: Path = CONFIG_FILE) -> bool:
         """Save current mappings and blocked keys to a JSON file"""
@@ -766,18 +734,15 @@ class KeyRemapper:
             with open(filepath, 'w') as f:
                 json.dump(config, f, indent=4)
             
-            logger.info(f"Configuration saved to {filepath}")
             return True
             
-        except Exception as e:
-            logger.error(f"Failed to save config: {e}")
+        except Exception:
             return False
     
     def load_config(self, filepath: Path = CONFIG_FILE) -> bool:
         """Load mappings and blocked keys from a JSON file"""
         try:
             if not filepath.exists():
-                logger.info(f"No config file found at {filepath}")
                 return False
             
             with open(filepath, 'r') as f:
@@ -812,14 +777,9 @@ class KeyRemapper:
                     if not blocked_data.get("enabled", True):
                         self.toggle_blocked_key(key)
             
-            logger.info(f"Loaded {len(self.mappings)} mappings and {len(self.blocked_keys)} blocked keys from {filepath}")
             return True
             
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in config file: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to load config: {e}")
+        except (json.JSONDecodeError, Exception):
             return False
     
     def list_mappings(self) -> List[Dict]:
@@ -1080,8 +1040,7 @@ def interactive_menu(remapper: KeyRemapper):
             print("\n\nInterrupted. Stopping remapper...")
             remapper.stop()
             break
-        except Exception as e:
-            logger.error(f"Error: {e}")
+        except Exception:
             input("\nPress Enter to continue...")
 
 

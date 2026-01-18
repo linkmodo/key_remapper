@@ -22,7 +22,7 @@ import os
 # Import the core remapper functionality
 from key_remapper import (
     KeyRemapper, CONFIG_FILE, KEY_NAME_TO_VK, 
-    check_admin, logger
+    check_admin
 )
 
 # Try to import pystray for system tray support
@@ -32,7 +32,6 @@ try:
     TRAY_AVAILABLE = True
 except ImportError:
     TRAY_AVAILABLE = False
-    logger.warning("pystray or PIL not available - system tray disabled")
 
 # Set appearance
 ctk.set_appearance_mode("dark")
@@ -45,39 +44,142 @@ class KeyCaptureDialog(ctk.CTkToplevel):
     def __init__(self, parent, title: str = "Press a Key"):
         super().__init__(parent)
         self.title(title)
-        self.geometry("300x150")
+        self.geometry("450x280")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
         
         self.result = None
+        self.detected_keys = []
         
         # Center the dialog
         self.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - 300) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 150) // 2
+        x = parent.winfo_x() + (parent.winfo_width() - 450) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 280) // 2
         self.geometry(f"+{x}+{y}")
         
         # UI
         self.label = ctk.CTkLabel(
             self, 
-            text="Press any key...\n\nOr type a key name and press Enter",
-            font=ctk.CTkFont(size=14)
+            text="Press any key or key combination...",
+            font=ctk.CTkFont(size=14, weight="bold")
         )
-        self.label.pack(pady=20)
+        self.label.pack(pady=(20, 10))
         
-        self.entry = ctk.CTkEntry(self, width=200, placeholder_text="e.g., ctrl+a, f1, slash")
-        self.entry.pack(pady=10)
-        self.entry.bind("<Return>", self._on_enter)
-        self.entry.focus()
+        self.detected_label = ctk.CTkLabel(
+            self,
+            text="Detected: (none)",
+            font=ctk.CTkFont(size=13),
+            text_color="gray"
+        )
+        self.detected_label.pack(pady=5)
         
-        self.cancel_btn = ctk.CTkButton(self, text="Cancel", command=self.destroy, width=100)
-        self.cancel_btn.pack(pady=10)
+        self.info_label = ctk.CTkLabel(
+            self,
+            text="Hold modifiers (Ctrl/Shift/Alt) then press a key\nNote: Win key combos may not detect - type manually below",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        self.info_label.pack(pady=5)
+        
+        # Manual entry option
+        self.manual_entry = ctk.CTkEntry(self, width=300, placeholder_text="Or type manually: e.g., win+shift+f23")
+        self.manual_entry.pack(pady=5)
+        self.manual_entry.bind("<Return>", self._on_manual_entry)
+        
+        # Buttons
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(pady=15)
+        
+        self.use_btn = ctk.CTkButton(btn_frame, text="Use This Key", command=self._use_key, width=120, state="disabled")
+        self.use_btn.pack(side="left", padx=5)
+        
+        self.cancel_btn = ctk.CTkButton(btn_frame, text="Cancel", command=self.destroy, width=100)
+        self.cancel_btn.pack(side="left", padx=5)
+        
+        # Bind key events
+        self.bind("<KeyPress>", self._on_key_press)
+        self.bind("<KeyRelease>", self._on_key_release)
+        self.focus_force()
     
-    def _on_enter(self, event):
-        text = self.entry.get().strip()
+    def _on_key_press(self, event):
+        """Handle key press event"""
+        # Get the main key first
+        key_name = self._get_key_name(event)
+        
+        # Skip if no valid key detected
+        if not key_name:
+            return
+        
+        # Build key combination
+        keys = []
+        
+        # Check if this is a modifier key being pressed by itself
+        modifier_keys = ["ctrl", "lctrl", "rctrl", "shift", "lshift", "rshift", 
+                        "alt", "lalt", "ralt", "win", "lwin", "rwin"]
+        
+        if key_name in modifier_keys:
+            # Just show the modifier key itself
+            keys.append(key_name)
+        else:
+            # Check modifiers from event state (only for non-modifier keys)
+            if event.state & 0x0004:  # Control
+                keys.append("ctrl")
+            if event.state & 0x0001:  # Shift
+                keys.append("shift")
+            if event.state & 0x20000 or event.state & 0x0008:  # Alt
+                keys.append("alt")
+            # Note: Win key state is unreliable in tkinter, so we detect it from keysym
+            
+            # Add the main key
+            keys.append(key_name)
+        
+        if keys:
+            self.detected_keys = keys
+            detected_str = "+".join(keys)
+            self.detected_label.configure(text=f"Detected: {detected_str}", text_color="#27ae60")
+            self.use_btn.configure(state="normal")
+    
+    def _on_key_release(self, event):
+        """Handle key release - finalize detection"""
+        pass
+    
+    def _get_key_name(self, event):
+        """Convert tkinter key event to our key name format"""
+        key = event.keysym.lower()
+        
+        # Map tkinter key names to our format
+        key_map = {
+            "control_l": "lctrl", "control_r": "rctrl", "control": "ctrl",
+            "shift_l": "lshift", "shift_r": "rshift", "shift": "shift",
+            "alt_l": "lalt", "alt_r": "ralt", "alt": "alt",
+            "win_l": "lwin", "win_r": "rwin", "super_l": "lwin", "super_r": "rwin",
+            "caps_lock": "capslock", "num_lock": "numlock", "scroll_lock": "scrolllock",
+            "prior": "pageup", "next": "pagedown",
+            "kp_0": "num0", "kp_1": "num1", "kp_2": "num2", "kp_3": "num3",
+            "kp_4": "num4", "kp_5": "num5", "kp_6": "num6", "kp_7": "num7",
+            "kp_8": "num8", "kp_9": "num9",
+            "kp_add": "numplus", "kp_subtract": "numminus",
+            "kp_multiply": "nummultiply", "kp_divide": "numdivide",
+            "kp_decimal": "numdecimal",
+            "bracketleft": "lbracket", "bracketright": "rbracket",
+            "backslash": "backslash", "apostrophe": "quote",
+            "grave": "grave", "minus": "minus", "equal": "equals",
+        }
+        
+        return key_map.get(key, key if len(key) == 1 or key.startswith('f') and key[1:].isdigit() else key)
+    
+    def _on_manual_entry(self, event):
+        """Handle manual entry of key combination"""
+        text = self.manual_entry.get().strip()
         if text:
             self.result = text
+            self.destroy()
+    
+    def _use_key(self):
+        """Use the detected key combination"""
+        if self.detected_keys:
+            self.result = "+".join(self.detected_keys)
             self.destroy()
 
 
@@ -87,7 +189,7 @@ class AddMappingDialog(ctk.CTkToplevel):
     def __init__(self, parent, remapper: KeyRemapper):
         super().__init__(parent)
         self.title("Add Key Mapping")
-        self.geometry("400x300")
+        self.geometry("400x350")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -98,18 +200,24 @@ class AddMappingDialog(ctk.CTkToplevel):
         # Center
         self.update_idletasks()
         x = parent.winfo_x() + (parent.winfo_width() - 400) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 300) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 350) // 2
         self.geometry(f"+{x}+{y}")
         
         # Source key
         ctk.CTkLabel(self, text="Source Key (key to remap):", font=ctk.CTkFont(size=13)).pack(pady=(20, 5))
-        self.source_entry = ctk.CTkEntry(self, width=300, placeholder_text="e.g., capslock, ctrl+a, f1")
-        self.source_entry.pack(pady=5)
+        source_frame = ctk.CTkFrame(self, fg_color="transparent")
+        source_frame.pack(pady=5)
+        self.source_entry = ctk.CTkEntry(source_frame, width=240, placeholder_text="e.g., capslock, ctrl+a, f1")
+        self.source_entry.pack(side="left", padx=(0, 5))
+        ctk.CTkButton(source_frame, text="🎯 Detect", command=self._detect_source, width=60).pack(side="left")
         
         # Target key
         ctk.CTkLabel(self, text="Target Key (what it becomes):", font=ctk.CTkFont(size=13)).pack(pady=(15, 5))
-        self.target_entry = ctk.CTkEntry(self, width=300, placeholder_text="e.g., escape, ctrl+c, shift+f1")
-        self.target_entry.pack(pady=5)
+        target_frame = ctk.CTkFrame(self, fg_color="transparent")
+        target_frame.pack(pady=5)
+        self.target_entry = ctk.CTkEntry(target_frame, width=240, placeholder_text="e.g., escape, ctrl+c, shift+f1")
+        self.target_entry.pack(side="left", padx=(0, 5))
+        ctk.CTkButton(target_frame, text="🎯 Detect", command=self._detect_target, width=60).pack(side="left")
         
         # Description
         ctk.CTkLabel(self, text="Description (optional):", font=ctk.CTkFont(size=13)).pack(pady=(15, 5))
@@ -125,6 +233,22 @@ class AddMappingDialog(ctk.CTkToplevel):
         
         self.source_entry.focus()
     
+    def _detect_source(self):
+        """Open key detection dialog for source key"""
+        dialog = KeyCaptureDialog(self, "Detect Source Key")
+        self.wait_window(dialog)
+        if dialog.result:
+            self.source_entry.delete(0, 'end')
+            self.source_entry.insert(0, dialog.result)
+    
+    def _detect_target(self):
+        """Open key detection dialog for target key"""
+        dialog = KeyCaptureDialog(self, "Detect Target Key")
+        self.wait_window(dialog)
+        if dialog.result:
+            self.target_entry.delete(0, 'end')
+            self.target_entry.insert(0, dialog.result)
+    
     def _on_add(self):
         source = self.source_entry.get().strip()
         target = self.target_entry.get().strip()
@@ -136,6 +260,13 @@ class AddMappingDialog(ctk.CTkToplevel):
         
         if self.remapper.add_mapping(source, target, desc):
             self.result = (source, target, desc)
+            messagebox.showinfo(
+                "Mapping Added",
+                f"Key mapping created successfully!\n\n"
+                f"Source: {source}\n"
+                f"Target: {target}\n"
+                f"{('Description: ' + desc) if desc else ''}"
+            )
             self.destroy()
         else:
             messagebox.showerror("Error", f"Invalid key name. Check spelling.\nAvailable keys include: a-z, 0-9, f1-f12, ctrl, shift, alt, escape, space, etc.")
@@ -171,8 +302,11 @@ class BlockKeyDialog(ctk.CTkToplevel):
         
         # Key to block
         ctk.CTkLabel(self, text="Key to Block:", font=ctk.CTkFont(size=13)).pack(pady=(10, 5))
-        self.key_entry = ctk.CTkEntry(self, width=300, placeholder_text="e.g., /, win, alt+tab, f1")
-        self.key_entry.pack(pady=5)
+        key_frame = ctk.CTkFrame(self, fg_color="transparent")
+        key_frame.pack(pady=5)
+        self.key_entry = ctk.CTkEntry(key_frame, width=240, placeholder_text="e.g., /, win, alt+tab, f1")
+        self.key_entry.pack(side="left", padx=(0, 5))
+        ctk.CTkButton(key_frame, text="🎯 Detect", command=self._detect_key, width=60).pack(side="left")
         
         # Description
         ctk.CTkLabel(self, text="Description (optional):", font=ctk.CTkFont(size=13)).pack(pady=(10, 5))
@@ -187,6 +321,14 @@ class BlockKeyDialog(ctk.CTkToplevel):
         ctk.CTkButton(btn_frame, text="Cancel", command=self.destroy, width=100).pack(side="left", padx=10)
         
         self.key_entry.focus()
+    
+    def _detect_key(self):
+        """Open key detection dialog"""
+        dialog = KeyCaptureDialog(self, "Detect Key to Block")
+        self.wait_window(dialog)
+        if dialog.result:
+            self.key_entry.delete(0, 'end')
+            self.key_entry.insert(0, dialog.result)
     
     def _on_block(self):
         key = self.key_entry.get().strip()
@@ -223,10 +365,6 @@ class KeyRemapperGUI(ctk.CTk):
         
         # Handle window close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        
-        # Check admin
-        if not check_admin():
-            self.after(500, self._show_admin_warning)
     
     def _create_ui(self):
         """Create the main UI"""
@@ -545,6 +683,7 @@ class KeyRemapperGUI(ctk.CTk):
         self.wait_window(dialog)
         if dialog.result:
             self._refresh_mappings()
+            self.remapper.save_config()
     
     def _remove_mapping(self):
         """Remove selected mapping"""
@@ -556,6 +695,7 @@ class KeyRemapperGUI(ctk.CTk):
         if messagebox.askyesno("Confirm", f"Remove mapping for '{source}'?"):
             self.remapper.remove_mapping(source)
             self._refresh_mappings()
+            self.remapper.save_config()
     
     def _toggle_mapping(self):
         """Toggle selected mapping"""
@@ -566,6 +706,7 @@ class KeyRemapperGUI(ctk.CTk):
         source = self.selected_mapping.mapping_source
         self.remapper.toggle_mapping(source)
         self._refresh_mappings()
+        self.remapper.save_config()
     
     def _block_key(self):
         """Open dialog to block a key"""
@@ -573,6 +714,7 @@ class KeyRemapperGUI(ctk.CTk):
         self.wait_window(dialog)
         if dialog.result:
             self._refresh_blocked()
+            self.remapper.save_config()
     
     def _unblock_key(self):
         """Unblock selected key"""
@@ -584,6 +726,7 @@ class KeyRemapperGUI(ctk.CTk):
         if messagebox.askyesno("Confirm", f"Unblock key '{key}'?"):
             self.remapper.unblock_key(key)
             self._refresh_blocked()
+            self.remapper.save_config()
     
     def _toggle_blocked(self):
         """Toggle selected blocked key"""
@@ -594,6 +737,7 @@ class KeyRemapperGUI(ctk.CTk):
         key = self.selected_blocked.blocked_key
         self.remapper.toggle_blocked_key(key)
         self._refresh_blocked()
+        self.remapper.save_config()
     
     def _start_remapper(self):
         """Start the remapper"""
@@ -685,6 +829,10 @@ LETTERS: a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x,
 NUMBERS: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9
 
 FUNCTION KEYS: f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12
+EXTENDED FUNCTION KEYS: f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24
+
+NOTE: Windows Copilot key is typically win+shift+f23
+      You can block this key combination to disable Copilot
 
 MODIFIERS: ctrl, lctrl, rctrl, shift, lshift, rshift, alt, lalt, ralt, win, lwin, rwin
 
@@ -702,6 +850,7 @@ Use + to combine keys, e.g.:
   shift+f1
   ctrl+shift+escape
   alt+tab
+  win+shift+f23 (Copilot key)
 """
         text.insert("1.0", content)
         text.configure(state="disabled")
@@ -730,7 +879,7 @@ Use + to combine keys, e.g.:
         
         ctk.CTkLabel(
             about_window, 
-            text="Gaming Edition - Version 1.0", 
+            text="Gaming Edition - Version 2.0", 
             font=ctk.CTkFont(size=14),
             text_color="gray"
         ).pack(pady=(0, 15))
@@ -746,6 +895,14 @@ Built by Li Fan, 2025
 Created out of frustration at being unable to
 disable or remap keys within a particular game.
 
+NEW IN VERSION 2.0
+──────────────────
+✨ Extended function keys support (F13-F24)
+✨ Interactive key detection with 🎯 Detect buttons
+✨ Auto-save: Changes saved automatically
+✨ Block Windows Copilot key (win+shift+f23)
+✨ No admin warning on startup
+
 KEY MAPPINGS (Remap Keys)
 ─────────────────────────
 Remap any key to another key or key combination.
@@ -753,41 +910,44 @@ Remap any key to another key or key combination.
 Examples:
   • CapsLock → Escape (great for Vim users)
   • F1 → Ctrl+S (quick save)
-  • F2 → Ctrl+Shift+S (save as)
-  • A → Ctrl+A (single key to combo)
+  • F23 → Disabled (block Copilot key)
 
 To add a mapping:
   1. Click "Add Mapping"
-  2. Enter source key (e.g., "f1", "capslock")
-  3. Enter target key(s) (e.g., "escape", "ctrl+s")
-  4. Click "Add"
+  2. Click 🎯 Detect or type key name
+  3. For Win key combos, type manually (e.g., win+shift+f23)
+  4. Click "Add" - saves automatically!
 
 BLOCKED KEYS (Disable Keys)
 ───────────────────────────
 Completely disable keys to prevent accidental presses.
-Perfect for gaming when you don't want to hit chat or pause!
 
 Examples:
   • Block "/" to prevent opening chat
-  • Block "Win" to prevent minimizing game
+  • Block "win+shift+f23" to disable Copilot
   • Block "Escape" to prevent pause menu
 
-KEY COMBINATION FORMAT
-──────────────────────
-Use "+" to combine modifier keys:
-  • ctrl+a
-  • shift+f1
-  • ctrl+shift+escape
-  • alt+tab
+KEY DETECTION FEATURE
+─────────────────────
+Click 🎯 Detect buttons to capture key presses:
+  • Press any key combination (Ctrl/Shift/Alt work)
+  • For Win key combos, type manually in the field
+  • Press Enter or click "Use This Key"
 
-Modifier keys: ctrl, shift, alt, win
-(Use lctrl/rctrl, lshift/rshift, lalt/ralt for specific sides)
+SUPPORTED KEYS
+──────────────
+• Letters: a-z
+• Numbers: 0-9
+• Function keys: f1-f24 (including extended F13-F24)
+• Modifiers: ctrl, shift, alt, win
+• Special: escape, tab, space, enter, etc.
+• Combinations: ctrl+a, win+shift+f23, etc.
 
 IMPORTANT NOTES
 ───────────────
-• Run as Administrator for games to work
+• Changes are saved automatically
 • Click "Start" to activate your mappings
-• Mappings are saved to key_remap_config.json
+• Works without admin (admin optional for some games)
 • Close to system tray to keep running in background
 
 ═══════════════════════════════════════
@@ -810,16 +970,6 @@ IMPORTANT NOTES
             width=100
         ).pack(pady=(0, 15))
     
-    def _show_admin_warning(self):
-        """Show admin warning"""
-        messagebox.showwarning(
-            "Administrator Required",
-            "This program is not running as Administrator.\n\n"
-            "For full compatibility with games, please:\n"
-            "1. Close this program\n"
-            "2. Right-click the executable\n"
-            "3. Select 'Run as administrator'"
-        )
     
     def _on_close(self):
         """Handle window close"""

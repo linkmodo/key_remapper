@@ -2,13 +2,22 @@
 
 A robust, gaming-compatible key remapping tool for Windows 11 (also works on Windows 10).
 
-Compiled .exe file can be downloaded directly here https://drive.google.com/file/d/1kUUBALFeoGf7AmNjgbKAfZfchaMKC_GV/view?usp=sharing
+**Version 2.0** | Built by Li Fan, 2025
 
-Make sure to right click and "Run as Admin" if it's not working right in your particular application/game.
+📥 **Download**: Compiled .exe file can be downloaded directly here: https://drive.google.com/file/d/1kUUBALFeoGf7AmNjgbKAfZfchaMKC_GV/view?usp=sharing
 
-**Version 1.0** | Built by Li Fan, 2025
+⚠️ **Important**: Right-click and "Run as Admin" if it's not working in your particular application/game.
 
 > *Created out of frustration at being unable to disable or remap keys within a particular game.*
+
+## ✨ What's New in Version 2.0
+
+- **Extended Function Keys (F13-F24)**: Full support for extended function keys including F13-F24
+- **Interactive Key Detection**: 🎯 Detect buttons to capture key presses in real-time
+- **Auto-Save**: All changes are automatically saved - no need to manually save config
+- **Block Windows Copilot Key**: Easily block `win+shift+f23` to disable Copilot
+- **No Admin Warning**: App works without admin privileges (optional for some games)
+- **Improved Key Capture**: Better handling of modifier keys and combinations
 
 ## Features
 
@@ -16,9 +25,10 @@ Make sure to right click and "Run as Admin" if it's not working right in your pa
 - **Gaming Compatible**: Uses low-level Windows hooks (`SetWindowsHookEx`) that work with most games and applications
 - **Key Combinations**: Remap single keys to key combinations (e.g., `F1` → `Ctrl+S`, `F2` → `Ctrl+Shift+S`)
 - **Key Blocking**: Completely disable specific keys to prevent accidental presses during gaming (e.g., block `/` key)
+- **Interactive Key Detection**: Click 🎯 Detect buttons to capture key presses automatically
 - **System Tray**: Minimize to system tray while remapper runs in the background
 - **Standalone Executable**: Build a single `.exe` file - no Python installation required
-- **Persistent Configuration**: Save and load your mappings to a JSON file
+- **Auto-Save Configuration**: Changes are saved automatically to JSON file
 - **Toggle Mappings**: Enable/disable individual mappings or blocked keys without removing them
 - **Logging**: All actions logged to `key_remapper.log` for troubleshooting
 
@@ -97,7 +107,9 @@ python key_remapper_gui.py
 
 Keys can be specified as:
 - Single keys: `a`, `f1`, `escape`, `space`
-- Combinations: `ctrl+a`, `shift+f1`, `ctrl+shift+escape`
+- Combinations: `ctrl+a`, `shift+f1`, `ctrl+shift+escape`, `win+shift+f23`
+
+**💡 Tip**: Use the 🎯 Detect buttons in the GUI to automatically capture key presses!
 
 #### Available Key Names
 
@@ -106,7 +118,8 @@ Keys can be specified as:
 | Letters | `a` - `z` |
 | Numbers | `0` - `9` |
 | Function | `f1` - `f12` |
-| Modifiers | `ctrl`, `lctrl`, `rctrl`, `shift`, `lshift`, `rshift`, `alt`, `lalt`, `ralt`, `win` |
+| Extended Function | `f13` - `f24` (includes Copilot key: `win+shift+f23`) |
+| Modifiers | `ctrl`, `lctrl`, `rctrl`, `shift`, `lshift`, `rshift`, `alt`, `lalt`, `ralt`, `win`, `lwin`, `rwin` |
 | Navigation | `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown` |
 | Special | `escape`, `tab`, `capslock`, `space`, `enter`, `backspace`, `delete`, `insert` |
 | Numpad | `num0` - `num9`, `numplus`, `numminus`, `nummultiply`, `numdivide` |
@@ -129,6 +142,7 @@ Keys can be specified as:
 | `win` | Prevent Windows key from minimizing your game |
 | `alt+tab` | Prevent accidental window switching |
 | `escape` | Prevent accidental pause menu in some games |
+| `win+shift+f23` | Disable Windows Copilot key (NEW in v2.0) |
 
 ## Configuration File
 

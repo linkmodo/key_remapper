@@ -156,6 +156,7 @@ Fair. You have three options, in order of paranoia:
 
    | Release | SHA-256 |
    |---------|---------|
+   | v2.3.0 | `883f407b5b61655076cc8e57d2bb50c1d2f74ba9e837bf16b2dfc09e34e4eff9` |
    | v2.2.0 | `44e158dd07c9a9b9d6c1ca109fbe19b2d546778de95515fb5bf35c52805b48a0` |
 
    This proves the file wasn't tampered with in transit. It does not prove the code is

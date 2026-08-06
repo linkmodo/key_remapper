@@ -6,10 +6,8 @@ A robust, gaming-compatible key remapping tool for Windows 11 (also works on Win
 
 📥 **Download**: Grab `KeyRemapper.exe` from the
 [latest release](https://github.com/linkmodo/key_remapper/releases/latest) — a single file, no
-Python needed.
-
-> Windows SmartScreen will warn about an unrecognised publisher because the executable is not
-> code-signed. Click **More info → Run anyway**, or build it yourself with `python build.py`.
+Python needed. Windows will show a SmartScreen warning the first time —
+[here's why, and what to click](#-windows-smartscreen-warning).
 
 Runs as a normal user. Administrator rights are only needed if you want it to affect
 windows that themselves run elevated (some games, Task Manager, etc.).
@@ -84,7 +82,13 @@ windows that run elevated themselves.
 
 ## Installation
 
-### Option 1: Run from Source
+### Option 1: Download the executable (easiest)
+
+1. Download `KeyRemapper.exe` from the
+   [latest release](https://github.com/linkmodo/key_remapper/releases/latest)
+2. Double-click it. See the SmartScreen note below for the first-run warning.
+
+### Option 2: Run from Source
 
 1. Clone or download this repository
 2. Install dependencies:
@@ -96,7 +100,7 @@ windows that run elevated themselves.
    python key_remapper_gui.py
    ```
 
-### Option 2: Build Standalone Executable
+### Option 3: Build Standalone Executable
 
 1. Install dependencies:
    ```powershell
@@ -108,6 +112,72 @@ windows that run elevated themselves.
    ```
 3. Find the executable at `dist/KeyRemapper.exe`
 4. Double-click to run
+
+## ⚠️ Windows SmartScreen warning
+
+The first time you run the downloaded `.exe`, Windows shows a blue box:
+
+> **Windows protected your PC**
+> Microsoft Defender SmartScreen prevented an unrecognised app from starting.
+
+**To run it anyway: click "More info", then "Run anyway".**
+
+### Why it happens
+
+The executable is **not code-signed**. A signing certificate costs money per year, and this is a
+free hobby project. SmartScreen flags *every* unsigned executable that it hasn't seen downloaded
+many times before — it is a statement about the certificate and download count, not about
+whether anything is wrong with the file. The warning fades for everyone as more people download
+a given release.
+
+Some browsers also block the download itself for the same reason. In Edge or Chrome, choose
+**Keep** → **Keep anyway** in the downloads bar.
+
+### Don't want to trust a stranger's binary?
+
+Fair. You have three options, in order of paranoia:
+
+1. **Verify the checksum** — confirm your download is byte-for-byte the file published here:
+
+   ```powershell
+   Get-FileHash .\KeyRemapper.exe -Algorithm SHA256
+   ```
+
+   | Release | SHA-256 |
+   |---------|---------|
+   | v2.2.0 | `44e158dd07c9a9b9d6c1ca109fbe19b2d546778de95515fb5bf35c52805b48a0` |
+
+   This proves the file wasn't tampered with in transit. It does not prove the code is
+   trustworthy — for that, see below.
+
+2. **Read the source** — it's all in this repository, about 2,000 lines of Python, and the
+   `.exe` is just [`build.py`](build.py) running PyInstaller over it.
+
+3. **Build it yourself** — Option 3 above. Then no download, no warning, no trust required.
+
+### What the app actually does that looks suspicious
+
+A key remapper is, by construction, indistinguishable from a keylogger to a scanner: it installs
+a global `WH_KEYBOARD_LL` hook and therefore sees every keystroke you type. That is the whole
+mechanism — there is no way to remap keys without it. So here is exactly what it does with them:
+
+- **Your typing is never recorded.** Keystrokes are matched against your rules in memory and
+  then forgotten. There is no logging in the key-handling path
+  ([`_handle_key_event`](key_remapper.py)) apart from an error handler.
+- **One exception, and it's one you trigger:** when you press 🎯 Detect, the key code you
+  deliberately capture is written to the log so the feature can be debugged — e.g.
+  `Chord captured: ('shift', 'win') + 0x86`. Nothing else you type ever reaches the log.
+- **The log otherwise records actions only** — "added mapping", "remapper started" — plus the
+  rules you configure, which you wrote yourself.
+- **No network connections.** No telemetry, no update check, no sockets anywhere in the source.
+  The only outbound action is opening a URL or launching a program *you* assigned to the
+  Copilot key, which hands off to your normal browser or shell.
+- **It writes to two places**: `%APPDATA%\KeyRemapper\` (config + log), and — only if you tick
+  "Launch when I sign in" — one `KeyRemapper` value under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Unticking it removes the value.
+
+Every one of these is checkable in [`key_remapper.py`](key_remapper.py); `grep` for `logger.`,
+`winreg`, and `webbrowser` and you'll find the lot.
 
 ## Usage
 
@@ -332,6 +402,20 @@ remaps, blocks, per-app scoping, dual-role keys, the pause hotkey, the Copilot c
 hook and config round-tripping.
 
 ## Troubleshooting
+
+### "Windows protected your PC" when I run the .exe
+
+Click **More info → Run anyway**. The executable is not code-signed, so SmartScreen flags it —
+see [Windows SmartScreen warning](#-windows-smartscreen-warning) for why, how to verify the
+download's checksum, and how to build it yourself instead.
+
+### My antivirus flagged it
+
+Expect the occasional false positive: the app installs a global keyboard hook, which is the same
+API a keylogger uses, and PyInstaller one-file executables are themselves a common heuristic
+trigger. The [SmartScreen section](#-windows-smartscreen-warning) documents exactly what the app
+does with your keystrokes and where it writes. Building from source avoids the packed-executable
+heuristic entirely.
 
 ### Remapper doesn't work in games
 

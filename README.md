@@ -2,7 +2,7 @@
 
 A robust, gaming-compatible key remapping tool for Windows 11 (also works on Windows 10).
 
-**Version 2.2** | Built by Li Fan, 2025
+**Version 2.3** | Built by Li Fan, 2025
 
 📥 **Download**: Grab `KeyRemapper.exe` from the
 [latest release](https://github.com/linkmodo/key_remapper/releases/latest) — a single file, no
@@ -13,6 +13,17 @@ Runs as a normal user. Administrator rights are only needed if you want it to af
 windows that themselves run elevated (some games, Task Manager, etc.).
 
 > *Created out of frustration at being unable to disable or remap keys within a particular game.*
+
+## ✨ What's New in Version 2.3
+
+- **Scrollbars only appear when there is something to scroll** — every panel hides its
+  scrollbar while the content fits
+- **Reset everything to defaults** — one button in Settings clears all rules, the Copilot
+  action and every setting, and removes the logon entry
+- **Nothing is blocked out of the box.** A stale development config meant `/` could arrive
+  pre-blocked; a fresh install now starts completely empty
+- **Rewritten Help/About** — leads with what the app does, with the project link and a
+  ☕ Donate button at the end
 
 ## ✨ What's New in Version 2.2
 
@@ -456,6 +467,15 @@ heuristic entirely.
 - Some games with kernel-level anti-cheat may not work
 - Cannot remap mouse buttons (keyboard only)
 - Cannot remap keys used by Windows itself (e.g., Ctrl+Alt+Del)
+
+## Support this project
+
+Built by **Li Fan**, 2025. If Key Remapper saved you some frustration, you're very welcome to
+[buy me a coffee ☕](https://paypal.me/lifan) — there's also a Donate button in the app's
+**ℹ️ About** dialog.
+
+Bug reports and feature requests are welcome on the
+[issue tracker](https://github.com/linkmodo/key_remapper/issues).
 
 ## License
 

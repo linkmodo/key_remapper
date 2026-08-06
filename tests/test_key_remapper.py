@@ -332,6 +332,75 @@ class DualRoleTests(unittest.TestCase):
         self.assertFalse(self.remapper.add_mapping('ctrl+j', 'a', hold='shift'))
 
 
+class DefaultsTests(unittest.TestCase):
+
+    def test_a_new_remapper_has_no_rules(self):
+        """Nothing is blocked or remapped until the user says so."""
+        remapper = FakeRemapper()
+        self.assertEqual(remapper.list_mappings(), [])
+        self.assertEqual(remapper.list_blocked_keys(), [])
+        self.assertFalse(remapper.copilot.enabled)
+        self.assertEqual(remapper.settings, kr.Settings())
+
+    def test_slash_is_not_blocked_by_default(self):
+        """Regression: '/' used to arrive pre-blocked from a stale dev config."""
+        remapper = FakeRemapper()
+        self.assertFalse(remapper.down(int(kr.VirtualKey.VK_OEM_2)))
+        self.assertEqual(remapper.sent, [])
+
+    def test_reset_clears_everything(self):
+        remapper = FakeRemapper()
+        remapper.add_mapping('capslock', 'escape', hold='ctrl')
+        remapper.add_mapping('f1', 'a', app='game.exe')
+        remapper.block_key('/')
+        remapper.set_copilot(kr.CopilotConfig(enabled=True, mode='keys', value='ralt'))
+        remapper.apply_settings(kr.Settings(toggle_hotkey='ctrl+alt+f12', tap_timeout_ms=100))
+
+        remapper.reset_to_defaults()
+
+        self.assertEqual(remapper.list_mappings(), [])
+        self.assertEqual(remapper.list_blocked_keys(), [])
+        self.assertEqual(remapper.copilot, kr.CopilotConfig())
+        self.assertEqual(remapper.settings, kr.Settings())
+        self.assertIsNone(remapper._toggle_signature)
+        self.assertFalse(remapper._has_app_rules)
+        self.assertFalse(remapper._needs_mouse_hook)
+
+    def test_keys_pass_through_after_a_reset(self):
+        remapper = FakeRemapper()
+        remapper.add_mapping('f13', 'a')
+        remapper.block_key('f14')
+        remapper.reset_to_defaults()
+
+        self.assertFalse(remapper.down(F13))
+        self.assertFalse(remapper.down(int(kr.VirtualKey.VK_F14)))
+        self.assertEqual(remapper.sent, [])
+
+    def test_reset_releases_a_key_that_is_still_held(self):
+        remapper = FakeRemapper()
+        remapper.add_mapping('f13', 'a')
+        remapper.down(F13)
+        remapper.reset_to_defaults()
+        self.assertIn((KEY_A, 'up'), remapper.sent)
+
+    def test_reset_is_persisted_as_an_empty_config(self):
+        path = Path(tempfile.mkdtemp()) / "config.json"
+        remapper = FakeRemapper()
+        remapper.add_mapping('f13', 'a')
+        remapper.save_config(path)
+
+        remapper.reset_to_defaults()
+        remapper.save_config(path)
+
+        reloaded = FakeRemapper()
+        reloaded.load_config(path)
+        self.assertEqual(reloaded.list_mappings(), [])
+        self.assertEqual(reloaded.settings, kr.Settings())
+
+    def test_version_is_reported(self):
+        self.assertRegex(kr.__version__, r'^\d+\.\d+\.\d+$')
+
+
 class PauseTests(unittest.TestCase):
 
     def setUp(self):

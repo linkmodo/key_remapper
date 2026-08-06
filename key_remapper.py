@@ -63,6 +63,11 @@ INPUT_KEYBOARD = 1
 DUMMY_KEY = 0xFF
 
 APP_NAME = "KeyRemapper"
+__version__ = "2.3.0"
+
+# Where users can find the project and support it
+PROJECT_URL = "https://github.com/linkmodo/key_remapper"
+DONATE_URL = "https://paypal.me/lifan"
 
 
 def _default_config_dir() -> Path:
@@ -1032,6 +1037,27 @@ class KeyRemapper:
                 self._send_key_combination(pending.mapping.hold_keys, key_up=True)
         self.state.pending_dual.clear()
 
+    def reset_to_defaults(self):
+        """
+        Wipe every rule and setting, returning the remapper to a fresh install.
+
+        The hook keeps running if it was running - with nothing left to do it
+        simply passes every key straight through.
+        """
+        self._release_held_targets()
+
+        with self._lock:
+            self.mappings.clear()
+            self.blocked_keys.clear()
+            self._rebuild_index()
+            self.copilot = CopilotConfig()
+            self._copilot_target = ()
+            self.settings = Settings()
+            self._toggle_signature = None
+
+        self.paused = False
+        logger.info("Reset to defaults")
+
     def set_paused(self, paused: bool):
         """Pause or resume all remapping without releasing the hook"""
         if self.paused == paused:
@@ -1885,7 +1911,7 @@ def interactive_menu(remapper: KeyRemapper):
     def print_menu():
         clear_screen()
         print("=" * 50)
-        print("       WINDOWS KEY REMAPPER v2.1")
+        print(f"       WINDOWS KEY REMAPPER v{__version__}")
         print("       Gaming Compatible Edition")
         print("=" * 50)
 

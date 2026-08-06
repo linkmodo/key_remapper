@@ -15,6 +15,7 @@ from tkinter import messagebox, filedialog
 import threading
 import json
 import queue
+import webbrowser
 from pathlib import Path
 from typing import Callable, Optional
 import sys
@@ -24,7 +25,8 @@ import os
 from key_remapper import (
     KeyRemapper, CONFIG_FILE, CONFIG_DIR, KEY_NAME_TO_VK, VK_TO_KEY_NAME,
     CopilotConfig, DEFAULT_COPILOT_KEY, Settings,
-    is_run_at_startup, set_run_at_startup, check_admin, logger
+    is_run_at_startup, set_run_at_startup, check_admin, logger,
+    __version__, PROJECT_URL, DONATE_URL
 )
 
 # Try to import pystray for system tray support
@@ -38,6 +40,48 @@ except ImportError:
 # Set appearance
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+
+
+class AutoHideScrollableFrame(ctk.CTkScrollableFrame):
+    """
+    A scrollable frame whose scrollbar only appears when it is needed.
+
+    CustomTkinter always reserves and draws the scrollbar; here it is hidden
+    while the content fits, and restored the moment it does not.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._scrollbar_visible = True
+        self.bind("<Configure>", self._refresh_scrollbar, add="+")
+        self._parent_canvas.bind("<Configure>", self._refresh_scrollbar, add="+")
+        # A tab that has never been shown reports no height, so re-check when it
+        # is first mapped - that is the moment the bar would become visible
+        self._parent_canvas.bind("<Map>", self._refresh_scrollbar, add="+")
+        self.after(120, self._refresh_scrollbar)
+
+    def _content_overflows(self) -> bool:
+        visible = self._parent_canvas.winfo_height()
+        if visible <= 1:
+            # Not laid out yet (e.g. a background tab): nothing to scroll past
+            return False
+        bbox = self._parent_canvas.bbox("all")
+        if not bbox:
+            return False
+        return (bbox[3] - bbox[1]) > visible + 1
+
+    def _refresh_scrollbar(self, event=None):
+        try:
+            needed = self._content_overflows()
+            if needed == self._scrollbar_visible:
+                return
+            self._scrollbar_visible = needed
+            if needed:
+                self._scrollbar.grid()
+            else:
+                self._scrollbar.grid_remove()
+        except Exception:
+            logger.debug("Could not update scrollbar visibility", exc_info=True)
 
 
 class UiQueueMixin:
@@ -735,7 +779,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         ).pack(anchor="w", pady=(0, 4))
 
         # Scrollable frame for mappings
-        self.mappings_frame = ctk.CTkScrollableFrame(self.tab_mappings)
+        self.mappings_frame = AutoHideScrollableFrame(self.tab_mappings)
         self.mappings_frame.pack(fill="both", expand=True)
 
         # Header
@@ -797,7 +841,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         ).pack(side="left", padx=5)
         
         # Scrollable frame for blocked keys
-        self.blocked_frame = ctk.CTkScrollableFrame(self.tab_blocked)
+        self.blocked_frame = AutoHideScrollableFrame(self.tab_blocked)
         self.blocked_frame.pack(fill="both", expand=True)
         
         # Header
@@ -842,7 +886,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
 
     def _create_copilot_tab(self):
         """Create the Copilot key tab content"""
-        tab = ctk.CTkScrollableFrame(self.tab_copilot)
+        tab = AutoHideScrollableFrame(self.tab_copilot)
         tab.pack(fill="both", expand=True)
 
         copilot = self.remapper.copilot
@@ -1152,7 +1196,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
 
     def _create_settings_tab(self):
         """Create the settings tab content"""
-        tab = ctk.CTkScrollableFrame(self.tab_settings)
+        tab = AutoHideScrollableFrame(self.tab_settings)
         tab.pack(fill="both", expand=True)
 
         settings = self.remapper.settings
@@ -1245,6 +1289,22 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         )
         self.settings_status_label.pack(anchor="w", padx=10, pady=(8, 4))
 
+        # --- Reset ---
+        ctk.CTkLabel(
+            tab, text="Start over", font=ctk.CTkFont(size=13, weight="bold")
+        ).pack(anchor="w", padx=10, pady=(14, 0))
+        ctk.CTkLabel(
+            tab,
+            text="Removes every mapping, blocked key and Copilot action, and puts all\n"
+                 "settings back to their defaults.",
+            font=ctk.CTkFont(size=11), text_color="gray", justify="left"
+        ).pack(anchor="w", padx=10, pady=(0, 4))
+
+        ctk.CTkButton(
+            tab, text="↺ Reset everything to defaults", command=self._reset_all, width=230,
+            fg_color="#c0392b", hover_color="#e74c3c"
+        ).pack(anchor="w", padx=10, pady=(0, 12))
+
         ctk.CTkLabel(
             tab,
             text=f"Settings and log: {CONFIG_DIR}",
@@ -1290,6 +1350,49 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
                               if settings.toggle_hotkey else "No pause hotkey set."),
             text_color="#27ae60"
         )
+
+    def _reset_all(self):
+        """Wipe every rule and setting after confirming"""
+        counts = (f"{len(self.remapper.mappings)} mapping(s), "
+                  f"{len(self.remapper.blocked_keys)} blocked key(s)")
+
+        if not messagebox.askyesno(
+            "Reset everything?",
+            f"This deletes {counts}, clears the Copilot key action and puts every\n"
+            "setting back to its default.\n\n"
+            "This cannot be undone. Continue?",
+            icon="warning"
+        ):
+            return
+
+        was_running = self.remapper.running
+        self.remapper.stop()
+        self.remapper.reset_to_defaults()
+
+        # The logon entry lives in the registry, not the config file
+        set_run_at_startup(False)
+
+        self.remapper.save_config()
+
+        # Rebuild the settings widgets from the fresh defaults
+        defaults = self.remapper.settings
+        self.hotkey_entry.delete(0, 'end')
+        self.timeout_slider.set(defaults.tap_timeout_ms)
+        self._on_timeout_slide(defaults.tap_timeout_ms)
+        self.startup_var.set(False)
+        self.minimized_var.set(defaults.start_minimized)
+        self.autostart_var.set(defaults.start_on_launch)
+        self.settings_status_label.configure(text="Everything reset to defaults.", text_color="gray")
+
+        self._refresh_lists()
+        self._update_status(self.remapper.running)
+
+        if was_running:
+            messagebox.showinfo(
+                "Reset",
+                "Everything is back to defaults.\n\nThe remapper was stopped because there "
+                "are no rules left to apply."
+            )
 
     def _on_pause_changed(self, paused: bool):
         """Called from the hook thread when the pause hotkey is used"""
@@ -1351,6 +1454,9 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
                 child.bind("<Double-Button-1>", lambda e, r=row: self._edit_mapping(r))
 
             self.mapping_widgets.append(row)
+
+        # Rows were added/removed, so the scrollbar may no longer be needed
+        self.after(60, self.mappings_frame._refresh_scrollbar)
     
     def _refresh_blocked(self):
         """Refresh the blocked keys list"""
@@ -1389,6 +1495,8 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
                 child.bind("<Button-1>", lambda e, r=row: self._select_blocked(r))
             
             self.blocked_widgets.append(row)
+
+        self.after(60, self.blocked_frame._refresh_scrollbar)
     
     def _select_mapping(self, row):
         """Select a mapping row"""
@@ -1635,57 +1743,56 @@ Use + to combine keys, e.g.:
         """Show About dialog with usage instructions and credits"""
         about_window = ctk.CTkToplevel(self)
         about_window.title("About Key Remapper")
-        about_window.geometry("550x520")
+        about_window.geometry("560x600")
         about_window.resizable(False, False)
         about_window.transient(self)
         about_window.grab_set()
-        
+
         # Center the window
         about_window.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() - 550) // 2
-        y = self.winfo_y() + (self.winfo_height() - 520) // 2
+        x = self.winfo_x() + (self.winfo_width() - 560) // 2
+        y = self.winfo_y() + (self.winfo_height() - 600) // 2
         about_window.geometry(f"+{x}+{y}")
-        
+
         # Title
         ctk.CTkLabel(
-            about_window, 
-            text="Key Remapper", 
+            about_window,
+            text="Key Remapper",
             font=ctk.CTkFont(size=24, weight="bold")
         ).pack(pady=(20, 5))
-        
+
         ctk.CTkLabel(
             about_window,
-            text="Gaming Edition - Version 2.2",
+            text=f"Gaming Edition - Version {__version__}",
             font=ctk.CTkFont(size=14),
             text_color="gray"
         ).pack(pady=(0, 15))
-        
+
         # Scrollable content
-        content_frame = ctk.CTkScrollableFrame(about_window, width=500, height=350)
+        content_frame = AutoHideScrollableFrame(about_window, width=510, height=340)
         content_frame.pack(padx=20, pady=10, fill="both", expand=True)
-        
-        about_text = """HOW TO USE THIS APPLICATION
+
+        about_text = """WHAT THIS APP DOES
 ═══════════════════════════════════════
 
-Built by Li Fan, 2025
-Created out of frustration at being unable to
-disable or remap keys within a particular game.
+Key Remapper rewrites your keyboard at the lowest
+level Windows allows, so it works in games and
+applications that ignore normal remapping tools.
 
-NEW IN VERSION 2.2
-──────────────────
-✨ Copilot key -> Right Alt / Windows / Menu / Right Ctrl
-   in one click
-✨ Per-app profiles: rules that only apply in one .exe
-✨ Dual-role keys: tap for one key, hold for another
-✨ Pause hotkey, run at logon, start in the tray
-✨ Mouse side buttons (mouse3/4/5) as sources
-✨ Edit mappings in place, with conflict warnings
-✨ 🎯 Detect now sees Win and Copilot combinations
+It can:
+  • Turn any key into any other key or combination
+  • Disable keys completely so they cannot misfire
+  • Take control of the Copilot key on modern laptops
+  • Apply rules only inside one application
+  • Give one key two jobs - tap and hold
+  • Use your mouse side buttons as extra keys
 
 COPILOT KEY
 ───────────
 The Copilot key is not a real key - the keyboard
 firmware sends SHIFT+WIN+F23 (on most laptops).
+That is why blocking F23 alone does nothing, and why
+letting go of the key can open the Start menu.
 
 Open the "Copilot Key" tab to:
   • 🎯 Detect exactly what your keyboard sends
@@ -1694,6 +1801,30 @@ Open the "Copilot Key" tab to:
   • Disable it completely
   • Send different keys instead
   • Launch a program, file or website
+
+KEY MAPPINGS (Remap Keys)
+─────────────────────────
+Remap any key to another key or key combination.
+
+Examples:
+  • CapsLock → Escape (great for Vim users)
+  • F1 → Ctrl+S (quick save)
+  • Mouse4 → Ctrl+C (side button copies)
+
+To add a mapping:
+  1. Click "Add Mapping"
+  2. Click 🎯 Detect, or type the key name
+  3. Click "Add" - it saves automatically
+Double-click any row later to edit it.
+
+BLOCKED KEYS (Disable Keys)
+───────────────────────────
+Completely disable keys to prevent accidental presses.
+
+Examples:
+  • Block "/" to stop chat opening mid-game
+  • Block "win" so you never minimise a fullscreen game
+  • Block "escape" to avoid the pause menu
 
 PER-APP PROFILES
 ────────────────
@@ -1704,55 +1835,35 @@ beat global ones for the same key.
 DUAL-ROLE KEYS (TAP vs HOLD)
 ────────────────────────────
 Fill in "When held instead" to give a key two jobs:
-  • CapsLock -> Escape when tapped, Ctrl when held
+  • CapsLock → Escape when tapped, Ctrl when held
 The threshold lives in the Settings tab.
 
 PAUSE HOTKEY
 ────────────
-Settings tab -> set a hotkey (e.g. ctrl+alt+f12) to
+Settings tab → set a hotkey (e.g. ctrl+alt+f12) to
 suspend every mapping without stopping the remapper.
 Anything held down is released, never left stuck.
 
-KEY MAPPINGS (Remap Keys)
-─────────────────────────
-Remap any key to another key or key combination.
-
-Examples:
-  • CapsLock → Escape (great for Vim users)
-  • F1 → Ctrl+S (quick save)
-  • F23 → Disabled (block Copilot key)
-
-To add a mapping:
-  1. Click "Add Mapping"
-  2. Click 🎯 Detect or type key name
-  3. For Win key combos, type manually (e.g., win+shift+f23)
-  4. Click "Add" - saves automatically!
-
-BLOCKED KEYS (Disable Keys)
-───────────────────────────
-Completely disable keys to prevent accidental presses.
-
-Examples:
-  • Block "/" to prevent opening chat
-  • Block "win+shift+f23" to disable Copilot
-  • Block "Escape" to prevent pause menu
-
-KEY DETECTION FEATURE
-─────────────────────
-Click 🎯 Detect buttons to capture key presses:
-  • Press any key combination (Ctrl/Shift/Alt work)
-  • For Win key combos, type manually in the field
-  • Press Enter or click "Use This Key"
+KEY DETECTION
+─────────────
+Click 🎯 Detect, then press the keys you want. Every
+keystroke is intercepted until you do, so Windows-key
+and Copilot combinations are captured correctly.
 
 SUPPORTED KEYS
 ──────────────
-• Letters: a-z
-• Numbers: 0-9
-• Function keys: f1-f24 (including extended F13-F24)
+• Letters: a-z          • Numbers: 0-9
+• Function keys: f1-f24 (including F13-F24)
 • Modifiers: ctrl, shift, alt, win
-• Special: escape, tab, space, enter, etc.
+• Special: escape, tab, space, enter, apps, etc.
 • Media: playpause, mute, volumeup, calculator, ...
+• Mouse: mouse3, mouse4, mouse5 (as a source)
 • Combinations: ctrl+a, win+shift+f23, etc.
+
+STARTING OVER
+─────────────
+Settings tab → "Reset everything to defaults" clears
+every rule and restores the original settings.
 
 IMPORTANT NOTES
 ───────────────
@@ -1764,17 +1875,24 @@ IMPORTANT NOTES
 • Close to system tray to keep running in background
 
 ═══════════════════════════════════════
-"""
-        
+
+Built by Li Fan, 2025
+Source, releases and issues:
+{project_url}
+
+If this app saved you some frustration, you are very
+welcome to buy me a coffee - the button is below.
+""".replace("{project_url}", PROJECT_URL)
+
         text_label = ctk.CTkLabel(
-            content_frame, 
+            content_frame,
             text=about_text,
             font=ctk.CTkFont(family="Consolas", size=12),
             justify="left",
             anchor="w"
         )
         text_label.pack(padx=10, pady=5, anchor="w")
-        
+
         # Environment info (diagnostics, not a warning)
         ctk.CTkLabel(
             about_window,
@@ -1782,16 +1900,38 @@ IMPORTANT NOTES
                  f"Elevated: {'yes' if check_admin() else 'no (fine for most apps)'}",
             font=ctk.CTkFont(size=11),
             text_color="gray"
-        ).pack(pady=(0, 6))
+        ).pack(pady=(2, 8))
 
-        # Close button
+        # Credits, project link and donation
+        btn_frame = ctk.CTkFrame(about_window, fg_color="transparent")
+        btn_frame.pack(pady=(0, 15))
+
         ctk.CTkButton(
-            about_window,
+            btn_frame,
+            text="🐙 GitHub",
+            command=lambda: webbrowser.open(PROJECT_URL),
+            width=120,
+            fg_color="#4a4a4a",
+            hover_color="#5f5f5f"
+        ).pack(side="left", padx=6)
+
+        ctk.CTkButton(
+            btn_frame,
+            text="💛 Donate",
+            command=lambda: webbrowser.open(DONATE_URL),
+            width=120,
+            fg_color="#f0a500",
+            hover_color="#ffc233",
+            text_color="#1a1a1a"
+        ).pack(side="left", padx=6)
+
+        ctk.CTkButton(
+            btn_frame,
             text="Close",
             command=about_window.destroy,
             width=100
-        ).pack(pady=(0, 15))
-    
+        ).pack(side="left", padx=6)
+
     
     def _on_close(self):
         """Handle window close"""

@@ -4,7 +4,12 @@ A robust, gaming-compatible key remapping tool for Windows 11 (also works on Win
 
 **Version 2.2** | Built by Li Fan, 2025
 
-📥 **Download**: Compiled .exe file can be downloaded directly here: https://drive.google.com/file/d/1kUUBALFeoGf7AmNjgbKAfZfchaMKC_GV/view?usp=sharing
+📥 **Download**: Grab `KeyRemapper.exe` from the
+[latest release](https://github.com/linkmodo/key_remapper/releases/latest) — a single file, no
+Python needed.
+
+> Windows SmartScreen will warn about an unrecognised publisher because the executable is not
+> code-signed. Click **More info → Run anyway**, or build it yourself with `python build.py`.
 
 Runs as a normal user. Administrator rights are only needed if you want it to affect
 windows that themselves run elevated (some games, Task Manager, etc.).

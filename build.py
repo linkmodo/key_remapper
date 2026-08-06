@@ -92,10 +92,9 @@ def build_executable():
         print("=" * 50)
         print(f"\nExecutable created at:")
         print(f"  {script_dir / 'dist' / 'KeyRemapper.exe'}")
-        print("\nTo run:")
-        print("  1. Right-click KeyRemapper.exe")
-        print("  2. Select 'Run as administrator'")
-        print("\nTip: Create a shortcut and set it to always run as admin.")
+        print("\nTo run: double-click KeyRemapper.exe")
+        print("\nTip: only run it as administrator if you need it to affect")
+        print("     windows that themselves run elevated (some games).")
     else:
         print("\n" + "=" * 50)
         print("BUILD FAILED!")

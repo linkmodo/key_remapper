@@ -2,21 +2,49 @@
 
 A robust, gaming-compatible key remapping tool for Windows 11 (also works on Windows 10).
 
-**Version 2.0** | Built by Li Fan, 2025
+**Version 2.2** | Built by Li Fan, 2025
 
 📥 **Download**: Compiled .exe file can be downloaded directly here: https://drive.google.com/file/d/1kUUBALFeoGf7AmNjgbKAfZfchaMKC_GV/view?usp=sharing
 
-⚠️ **Important**: Right-click and "Run as Admin" if it's not working in your particular application/game.
+Runs as a normal user. Administrator rights are only needed if you want it to affect
+windows that themselves run elevated (some games, Task Manager, etc.).
 
 > *Created out of frustration at being unable to disable or remap keys within a particular game.*
 
-## ✨ What's New in Version 2.0
+## ✨ What's New in Version 2.2
+
+- **Give the Copilot key back its old job**: one click turns it into **Right Alt**, **Windows**,
+  **Menu ▤** or **Right Ctrl** — whichever key your laptop sacrificed for it
+- **Per-app profiles**: scope any mapping or block to a single executable, so `F1` can mean one
+  thing in your game and nothing anywhere else
+- **Tap vs hold (dual-role keys)**: CapsLock can send Escape when tapped and act as Ctrl when held
+- **Pause hotkey**: suspend every mapping without stopping the remapper, from a hotkey or the tray
+- **Mouse side buttons** (`mouse3`/`mouse4`/`mouse5`) usable as sources
+- **Run at logon** and **start hidden in the tray**, with a new **Settings** tab
+- **Edit mappings in place** (double-click a row) with conflict warnings before you overwrite
+- **🎯 Detect now uses the low-level hook**, so Win, F13-F24 and Copilot combinations are
+  detectable instead of "type it manually"
+- **58 unit tests** covering the rule engine, including the Copilot chord and the mouse hook
+
+## ✨ What's New in Version 2.1
+
+- **Copilot Key tab**: detect what your laptop's Copilot key actually sends, then disable it,
+  send different keys, or launch any program, file or website — see [Copilot Key](#-copilot-key)
+- **Modifier combinations now work**: `ctrl+`/`shift+`/`alt+`/`win+` combos are matched by
+  modifier *family*, so the left/right key the hardware reports no longer matters.
+  (Previously any combination involving a modifier silently never fired.)
+- **Config and log moved to `%APPDATA%\KeyRemapper\`** so settings survive updates and work
+  from a one-file `.exe`. An existing `key_remap_config.json` next to the app is migrated once.
+- **Hook runs on its own thread**: a busy or blocked UI can no longer stall your keyboard,
+  and the text-mode menu works properly.
+- **Media & browser keys** available as remap targets (`playpause`, `mute`, `calculator`, …).
+- **Real logging again** — every action goes to `%APPDATA%\KeyRemapper\key_remapper.log`.
+
+## Version 2.0
 
 - **Extended Function Keys (F13-F24)**: Full support for extended function keys including F13-F24
 - **Interactive Key Detection**: 🎯 Detect buttons to capture key presses in real-time
 - **Auto-Save**: All changes are automatically saved - no need to manually save config
-- **Block Windows Copilot Key**: Easily block `win+shift+f23` to disable Copilot
-- **No Admin Warning**: App works without admin privileges (optional for some games)
 - **Improved Key Capture**: Better handling of modifier keys and combinations
 
 ## Features
@@ -25,23 +53,29 @@ A robust, gaming-compatible key remapping tool for Windows 11 (also works on Win
 - **Gaming Compatible**: Uses low-level Windows hooks (`SetWindowsHookEx`) that work with most games and applications
 - **Key Combinations**: Remap single keys to key combinations (e.g., `F1` → `Ctrl+S`, `F2` → `Ctrl+Shift+S`)
 - **Key Blocking**: Completely disable specific keys to prevent accidental presses during gaming (e.g., block `/` key)
+- **Copilot Key Control**: Detect and repurpose the dedicated Copilot key found on 2024+ laptops
+- **Per-App Profiles**: Limit any rule to a single executable
+- **Dual-Role Keys**: One key that taps one thing and holds another
+- **Pause Hotkey**: Suspend everything without stopping the remapper
+- **Mouse Side Buttons**: `mouse3`/`mouse4`/`mouse5` as remap sources
 - **Interactive Key Detection**: Click 🎯 Detect buttons to capture key presses automatically
 - **System Tray**: Minimize to system tray while remapper runs in the background
 - **Standalone Executable**: Build a single `.exe` file - no Python installation required
 - **Auto-Save Configuration**: Changes are saved automatically to JSON file
 - **Toggle Mappings**: Enable/disable individual mappings or blocked keys without removing them
-- **Logging**: All actions logged to `key_remapper.log` for troubleshooting
+- **Logging**: All actions logged to `%APPDATA%\KeyRemapper\key_remapper.log` for troubleshooting
 
 ## Requirements
 
 ### For Running from Source
 - Windows 10 or Windows 11
 - Python 3.8 or higher
-- **Administrator privileges** (required for gaming compatibility)
 
 ### For Executable
 - Windows 10 or Windows 11
-- **Administrator privileges**
+
+Administrator privileges are **optional**. Elevate only if you need the remapper to reach
+windows that run elevated themselves.
 
 ## Installation
 
@@ -68,18 +102,100 @@ A robust, gaming-compatible key remapping tool for Windows 11 (also works on Win
    python build.py
    ```
 3. Find the executable at `dist/KeyRemapper.exe`
-4. Right-click → Run as administrator
+4. Double-click to run
 
 ## Usage
 
 ### Running the GUI
 
-**Important**: Run as Administrator for full gaming compatibility!
-
 ```powershell
-# Right-click PowerShell -> Run as Administrator
 python key_remapper_gui.py
 ```
+
+If a specific game ignores your remaps, that game is probably running elevated — start the
+remapper as administrator in that case.
+
+### 🤖 Copilot Key
+
+The Copilot key on modern Windows laptops is **not a new scan code**. The keyboard firmware
+emits a hidden chord — on virtually every OEM that chord is `Left Shift + Left Win + F23`.
+That is why simply "blocking F23" does nothing useful, and why releasing the key can pop the
+Start menu.
+
+Open the **Copilot Key** tab and:
+
+| Step | What it does |
+|------|--------------|
+| 🎯 **Detect** | Swallows all input until you press the Copilot key, then records the exact chord your machine sends (handles the rare `win+c` / bare-`F23` keyboards) |
+| **Do nothing** | Kills the key entirely, including the Start-menu side effect |
+| **Send other key(s)** | Turn it into any key or combination — `ctrl+shift+p`, `playpause`, `f13`, … |
+| **Launch a program or file** | Point it at an `.exe`, document, folder or shell command |
+| **Open a website** | Any URL, opened in your default browser |
+| **Pass through** | Leave the key alone |
+
+#### Give it back the key your laptop removed
+
+Most laptops made room for the Copilot key by dropping a key you were already using. One click
+puts it back:
+
+| Button | Result |
+|--------|--------|
+| **Right Alt** | The Copilot key behaves as `ralt` (AltGr on international layouts) |
+| **Windows** | Acts as a Windows key |
+| **Menu ▤** | The context-menu key that most Copilot keyboards replaced |
+| **Right Ctrl** | Acts as `rctrl` |
+
+Modifier targets are *held* for as long as the firmware holds the chord, so `Copilot`+another key
+works on keyboards that keep the chord down. Most send a single burst, which lands as a tap —
+exactly what you want for Menu and Windows.
+
+Other quick presets: *Disable it*, *Screenshot* (`win+shift+s`), *Play/Pause*, *File Explorer*.
+**Apply** saves immediately; the remapper must be started (▶ Start) for the key to take effect.
+
+> Windows 11 24H2 can also remap this key from Settings, but only to signed, MSIX-packaged
+> apps. This tab works with anything on your machine.
+
+Under the hood, when the chord fires the remapper injects an unassigned virtual key so that
+releasing the still-held Windows key does not open the Start menu, virtually releases the
+held modifiers, and only then performs your action — so `Shift`/`Win` never leak into the
+keys it sends.
+
+### Per-app profiles
+
+Leave **Only in this app** empty and a rule applies everywhere. Fill in an executable name
+(`game.exe` — a full path is fine, it gets reduced to the file name) and the rule only fires
+while that window has focus. An app-specific rule beats a global one for the same key, so you
+can have a global default and a per-game override.
+
+The foreground executable is only looked up when at least one app-scoped rule exists, and the
+answer is cached briefly — the hook stays fast.
+
+### Tap vs hold (dual-role keys)
+
+Fill in **When held instead** and a key gets two jobs:
+
+| Source | Target | When held | Result |
+|--------|--------|-----------|--------|
+| `capslock` | `escape` | `ctrl` | Tap for Escape, hold for Ctrl — the classic Vim setup |
+| `space` | `space` | `shift` | Space bar doubles as Shift |
+
+The hold role activates as soon as you press another key while holding it, or after the
+**tap vs hold threshold** (Settings tab, 250 ms by default). Hold roles need a single source
+key, not a combination.
+
+### Pause hotkey
+
+Set one in the **Settings** tab (e.g. `ctrl+alt+f12`) to suspend every mapping without
+releasing the hook — useful when a remap is fighting with an app. The status turns amber, the
+tray icon turns orange, and anything currently held down is released rather than left stuck.
+The tray menu has **Pause / Resume** too.
+
+### Mouse buttons
+
+`mouse3` (middle), `mouse4` and `mouse5` (the side buttons) can be used as **sources** for
+mappings and blocks — e.g. `mouse4` → `ctrl+c`. Left and right click are deliberately not
+remappable, and mouse buttons cannot be a *target*. The mouse hook is only installed when a
+rule actually needs it.
 
 ### Menu Options
 
@@ -95,9 +211,13 @@ python key_remapper_gui.py
 7. **List blocked keys** - View all blocked keys
 8. **Toggle blocked key** - Enable/disable a key block
 
+**Copilot Key:**
+9. **Configure the Copilot key** - Detect it and choose what it should do
+
 **Control:**
 - **S** - Start remapper (activate all mappings and blocks)
 - **X** - Stop remapper (deactivate all)
+- **P** - Pause/resume without releasing the hook
 - **W** - Save configuration to `key_remap_config.json`
 - **L** - Load configuration from config file
 - **K** - Show available keys
@@ -121,9 +241,15 @@ Keys can be specified as:
 | Extended Function | `f13` - `f24` (includes Copilot key: `win+shift+f23`) |
 | Modifiers | `ctrl`, `lctrl`, `rctrl`, `shift`, `lshift`, `rshift`, `alt`, `lalt`, `ralt`, `win`, `lwin`, `rwin` |
 | Navigation | `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown` |
-| Special | `escape`, `tab`, `capslock`, `space`, `enter`, `backspace`, `delete`, `insert` |
+| Special | `escape`, `tab`, `capslock`, `space`, `enter`, `backspace`, `delete`, `insert`, `apps` |
 | Numpad | `num0` - `num9`, `numplus`, `numminus`, `nummultiply`, `numdivide` |
+| Media | `playpause`, `nexttrack`, `prevtrack`, `mediastop`, `mute`, `volumeup`, `volumedown`, `calculator`, `mail` |
+| Browser | `browserback`, `browserforward`, `browserrefresh`, `browserhome`, `browsersearch` |
+| Mouse (source only) | `mouse3` / `middleclick`, `mouse4`, `mouse5` |
 | Punctuation | `semicolon`, `comma`, `period`, `slash`, `backslash`, `quote`, `grave`, `lbracket`, `rbracket` |
+
+Modifiers are matched by family: a mapping written as `ctrl+a` fires for either Ctrl key.
+Left/right distinctions still work when the modifier is the key being remapped (e.g. `ralt` → `ctrl`).
 
 ### Example Mappings
 
@@ -142,18 +268,21 @@ Keys can be specified as:
 | `win` | Prevent Windows key from minimizing your game |
 | `alt+tab` | Prevent accidental window switching |
 | `escape` | Prevent accidental pause menu in some games |
-| `win+shift+f23` | Disable Windows Copilot key (NEW in v2.0) |
+| `win+shift+f23` | The raw Copilot chord — prefer the **Copilot Key** tab, which also suppresses the Start menu |
 
 ## Configuration File
 
-Mappings and blocked keys are saved to `key_remap_config.json`:
+Everything is saved to `%APPDATA%\KeyRemapper\key_remap_config.json`:
 
 ```json
 {
+    "version": 4,
     "mappings": [
         {
             "source": "CAPSLOCK",
             "target": "ESCAPE",
+            "hold": "CTRL",
+            "app": "",
             "enabled": true,
             "description": "Caps Lock to Escape"
         }
@@ -161,37 +290,75 @@ Mappings and blocked keys are saved to `key_remap_config.json`:
     "blocked_keys": [
         {
             "key": "/",
+            "app": "game.exe",
             "enabled": true,
             "description": "Block slash key during gaming"
         }
-    ]
+    ],
+    "copilot": {
+        "enabled": true,
+        "modifiers": ["shift", "win"],
+        "key": "f23",
+        "mode": "keys",
+        "value": "ralt",
+        "description": "Copilot key"
+    },
+    "settings": {
+        "toggle_hotkey": "ctrl+alt+f12",
+        "tap_timeout_ms": 250,
+        "run_at_startup": false,
+        "start_minimized": false,
+        "start_on_launch": false
+    }
 }
 ```
+
+Copilot `mode` is one of `disable`, `keys`, `launch`, `url` or `passthrough`. Older config
+files load unchanged — missing sections fall back to defaults.
+
+## Tests
+
+```powershell
+python -m unittest discover -s tests
+```
+
+58 tests drive the rule engine directly (no real hooks, no keyboard input needed), covering
+remaps, blocks, per-app scoping, dual-role keys, the pause hotkey, the Copilot chord, the mouse
+hook and config round-tripping.
 
 ## Troubleshooting
 
 ### Remapper doesn't work in games
 
-1. **Run as Administrator** - Right-click the script and select "Run as administrator"
-2. Some anti-cheat systems may block keyboard hooks - this is by design for security
+1. If the game runs elevated, run the remapper as administrator too
+2. Some anti-cheat systems block keyboard hooks - this is by design for security
 
 ### Keys not being remapped
 
 1. Check that the remapper status shows "ACTIVE"
 2. Verify your mapping is enabled (not disabled)
-3. Check `key_remapper.log` for error messages
+3. Check `%APPDATA%\KeyRemapper\key_remapper.log` for error messages
+
+### The Copilot key still opens Copilot
+
+1. Use 🎯 **Detect** on the Copilot Key tab — your keyboard may send a different chord
+2. Make sure the remapper is started, and that the tab does not say "pass through"
 
 ### Program crashes
 
-1. Check `key_remapper.log` for error details
+1. Check `%APPDATA%\KeyRemapper\key_remapper.log` for error details
 2. Ensure you're using Python 3.8 or higher
 3. Make sure you're on Windows (not Linux/Mac)
 
 ## Technical Details
 
 - Uses `SetWindowsHookEx` with `WH_KEYBOARD_LL` for low-level keyboard interception
+- The hook is installed and pumped on a dedicated thread, so UI work can never stall input
 - Injects replacement keys using `SendInput` API
-- Marks injected events to prevent infinite loops
+- Marks injected events (`dwExtraInfo`) to prevent infinite loops
+- Combinations are matched as (modifier families, main key) signatures
+- Slow actions (launching apps, opening URLs) run on a worker thread — a low-level hook that
+  takes longer than `LowLevelHooksTimeout` is silently removed by Windows
 - Thread-safe design with proper locking
 
 ## Limitations

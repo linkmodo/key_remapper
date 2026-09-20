@@ -9,8 +9,10 @@ Run with:  python -m unittest discover -s tests
 """
 
 import json
+import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -33,24 +35,28 @@ KEY_J = 0x4A
 
 
 class FakeRemapper(kr.KeyRemapper):
-    """A remapper that records injected keys instead of sending them."""
+    """A remapper that records injected keys and actions instead of running them."""
 
     def __init__(self):
         super().__init__()
         self.sent = []
+        self.actions = []
         self.clock = 1000.0
 
     def _send_key(self, vk_code, key_up=False):
         self.sent.append((vk_code, 'up' if key_up else 'down'))
 
+    def _queue_action(self, action, value):
+        self.actions.append((action, value))
+
     def now(self):
         return self.clock
 
-    def down(self, vk):
-        return self._handle_key_event(vk, True, False)
+    def down(self, vk, scan=0):
+        return self._handle_key_event(vk, True, False, scan)
 
-    def up(self, vk):
-        return self._handle_key_event(vk, False, True)
+    def up(self, vk, scan=0):
+        return self._handle_key_event(vk, False, True, scan)
 
     def tap(self, vk):
         return self.down(vk), self.up(vk)
@@ -563,8 +569,25 @@ class CaptureTests(unittest.TestCase):
         self.remapper.down(LWIN)
         self.assertTrue(self.remapper.down(F23), "everything is swallowed while capturing")
 
-        self.assertEqual(self.captured, [(('shift', 'win'), F23)])
+        self.assertEqual(
+            self.captured,
+            [kr.CapturedChord(modifiers=('shift', 'win'), vk=F23, scan_code=0)]
+        )
         self.assertIsNone(self.remapper._capture_callback)
+
+    def test_capture_records_the_scan_code(self):
+        self.remapper.down(F23, scan=0x6E)
+        self.assertEqual(self.captured[0].scan_code, 0x6E)
+        self.assertEqual(self.captured[0].hardware_text(), 'vk 0x86 \u00b7 scan 0x6E')
+
+    def test_capture_of_an_unnamed_key_is_still_mappable(self):
+        self.remapper.down(0x97)  # a code with no friendly name
+        chord = self.captured[0]
+        self.assertFalse(chord.is_named_key())
+        self.assertEqual(chord.key_string(), 'vk0x97')
+        self.assertEqual(
+            FakeRemapper().parse_key_string(chord.key_string()), (0x97,)
+        )
 
     def test_escape_cancels(self):
         self.remapper.down(ESC)
@@ -576,6 +599,200 @@ class CaptureTests(unittest.TestCase):
         self.assertTrue(self.remapper.up(F23), "the tail of the chord must not leak")
         self.assertTrue(self.remapper.up(LWIN))
         self.assertFalse(self.remapper._capture_drain)
+
+
+class RawKeyCodeTests(unittest.TestCase):
+    """Keyboards send keys we have no name for - especially under Fn."""
+
+    def setUp(self):
+        self.remapper = FakeRemapper()
+
+    def test_hex_code_is_parsed(self):
+        self.assertEqual(self.remapper.parse_key_string('vk0x5d'), (0x5D,))
+
+    def test_decimal_code_is_parsed(self):
+        self.assertEqual(self.remapper.parse_key_string('vk93'), (93,))
+
+    def test_code_out_of_range_rejected(self):
+        with self.assertRaises(ValueError):
+            self.remapper.parse_key_string('vk0x1FF')
+
+    def test_unnamed_code_round_trips_through_a_rule(self):
+        self.assertTrue(self.remapper.add_mapping('vk0x97', 'a'))
+        self.assertEqual(self.remapper.list_mappings()[0]['source'], 'VK0X97')
+        self.assertTrue(self.remapper.down(0x97))
+        self.assertEqual(self.remapper.sent, [(KEY_A, 'down')])
+
+    def test_named_keys_still_win(self):
+        self.assertEqual(kr.vk_name(F23), 'f23')
+
+
+class FnKeyNotSupportedTests(unittest.TestCase):
+    """
+    Fn is deliberately not a modifier.
+
+    Nearly every keyboard handles Fn in its own controller and never tells
+    Windows, so an "fn" that parsed but never matched would be a trap. These
+    guard against it creeping back in.
+    """
+
+    def setUp(self):
+        self.remapper = FakeRemapper()
+
+    def test_fn_is_not_a_key_name(self):
+        with self.assertRaises(ValueError):
+            self.remapper.parse_key_string('fn')
+
+    def test_fn_combination_is_rejected_outright(self):
+        with self.assertRaises(ValueError):
+            self.remapper.parse_key_string('fn+f12')
+
+    def test_a_rule_using_fn_cannot_be_added(self):
+        self.assertFalse(self.remapper.add_mapping('fn+f12', 'mute'))
+        self.assertEqual(self.remapper.list_mappings(), [])
+
+    def test_no_fn_modifier_family(self):
+        self.assertNotIn('fn', kr.MODIFIER_FAMILY.values())
+        self.assertNotIn('fn', kr.FAMILY_GENERIC_VK)
+
+    def test_the_limitation_is_documented_in_the_code(self):
+        notice = kr.FN_KEY_NOTICE.lower()
+        self.assertIn('fn', notice)
+        self.assertIn('combination', notice)
+
+    def test_settings_no_longer_carry_a_learned_fn_code(self):
+        fields = {f.name for f in __import__('dataclasses').fields(kr.Settings)}
+        self.assertNotIn('fn_vk', fields)
+        self.assertNotIn('fn_scan', fields)
+
+    def test_an_old_config_with_fn_fields_still_loads(self):
+        """Anyone who ran the build that had Fn detection must not be stranded."""
+        path = Path(tempfile.mkdtemp()) / "old.json"
+        path.write_text(json.dumps({
+            "version": 5,
+            "mappings": [{"source": "F13", "target": "A", "enabled": True}],
+            "settings": {"tap_timeout_ms": 200, "fn_vk": 255, "fn_scan": 93},
+        }), encoding='utf-8')
+
+        loaded = FakeRemapper()
+        self.assertTrue(loaded.load_config(path))
+        self.assertEqual(loaded.settings.tap_timeout_ms, 200)
+        self.assertEqual(len(loaded.list_mappings()), 1)
+
+    def test_an_old_config_with_an_fn_rule_skips_just_that_rule(self):
+        path = Path(tempfile.mkdtemp()) / "oldrule.json"
+        path.write_text(json.dumps({
+            "version": 5,
+            "mappings": [
+                {"source": "FN+F12", "target": "", "action": "launch",
+                 "value": "calc.exe", "enabled": True},
+                {"source": "F13", "target": "A", "enabled": True},
+            ],
+        }), encoding='utf-8')
+
+        loaded = FakeRemapper()
+        self.assertTrue(loaded.load_config(path), "one bad rule must not fail the load")
+        sources = [m['source'] for m in loaded.list_mappings()]
+        self.assertEqual(sources, ['F13'])
+
+
+class MappingActionTests(unittest.TestCase):
+    """A key can open an app or a website instead of sending keys."""
+
+    def setUp(self):
+        self.remapper = FakeRemapper()
+
+    def test_launch_mapping_runs_the_action_and_swallows_the_key(self):
+        self.assertTrue(self.remapper.add_mapping(
+            'f13', '', action='launch', value='calc.exe'))
+
+        self.assertTrue(self.remapper.down(F13))
+        self.assertEqual(self.remapper.actions, [('launch', 'calc.exe')])
+        self.assertEqual(self.remapper.sent, [], "nothing is typed")
+        self.assertTrue(self.remapper.up(F13), "the release is swallowed too")
+
+    def test_url_mapping(self):
+        self.remapper.add_mapping('f13', '', action='url', value='claude.ai')
+        self.remapper.down(F13)
+        self.assertEqual(self.remapper.actions, [('url', 'claude.ai')])
+
+    def test_launch_needs_a_value(self):
+        self.assertFalse(self.remapper.add_mapping('f13', '', action='launch'))
+
+    def test_unknown_action_rejected(self):
+        self.assertFalse(self.remapper.add_mapping(
+            'f13', '', action='detonate', value='x'))
+
+    def test_hold_roles_do_not_mix_with_launching(self):
+        self.assertFalse(self.remapper.add_mapping(
+            'capslock', '', hold='ctrl', action='launch', value='calc.exe'))
+
+    def test_held_windows_key_does_not_open_the_start_menu(self):
+        self.remapper.add_mapping('win+f13', '', action='launch', value='calc.exe')
+        self.remapper.down(LWIN)
+        self.remapper.sent.clear()
+
+        self.assertTrue(self.remapper.down(F13))
+        self.assertIn((kr.DUMMY_KEY, 'down'), self.remapper.sent)
+        self.assertIn((LWIN, 'up'), self.remapper.sent,
+                      "the held Win key is released before the app opens")
+
+    def test_disabled_launch_mapping_does_nothing(self):
+        self.remapper.add_mapping('f13', '', action='launch', value='calc.exe')
+        self.remapper.toggle_mapping('f13')
+        self.assertFalse(self.remapper.down(F13))
+        self.assertEqual(self.remapper.actions, [])
+
+    def test_per_app_scope_applies_to_actions(self):
+        self.remapper.add_mapping('f13', '', app='game.exe',
+                                  action='launch', value='calc.exe')
+        foreground = ['notepad.exe']
+        self.remapper._foreground_exe = lambda: foreground[0]
+
+        self.assertFalse(self.remapper.down(F13))
+        self.assertEqual(self.remapper.actions, [])
+
+        foreground[0] = 'game.exe'
+        self.assertTrue(self.remapper.down(F13))
+        self.assertEqual(self.remapper.actions, [('launch', 'calc.exe')])
+
+    def test_listed_target_describes_the_action(self):
+        self.remapper.add_mapping('f13', '', action='launch', value='calc.exe')
+        self.remapper.add_mapping('f14', '', action='url', value='claude.ai')
+        targets = [m['display_target'] for m in self.remapper.list_mappings()]
+        self.assertEqual(targets, ['\u25b6 calc.exe', '\U0001f310 claude.ai'])
+
+    def test_conflict_message_names_the_app(self):
+        self.remapper.add_mapping('f13', '', action='launch', value='calc.exe')
+        self.assertIn('calc.exe', self.remapper.find_conflict('f13'))
+
+    def test_action_survives_a_config_round_trip(self):
+        path = Path(tempfile.mkdtemp()) / "actions.json"
+        self.remapper.add_mapping('f13', '', 'open the calculator',
+                                  action='launch', value='calc.exe')
+        self.remapper.add_mapping('f14', '', action='url', value='claude.ai')
+        self.remapper.save_config(path)
+
+        loaded = FakeRemapper()
+        self.assertTrue(loaded.load_config(path))
+        self.assertEqual(loaded.list_mappings(), self.remapper.list_mappings())
+
+    def test_protocol_uri_is_opened_by_the_shell(self):
+        """Packaged apps have no .exe, so they must not go through the shell."""
+        self.assertTrue(kr.KeyRemapper._URI_SCHEME.match('ms-settings:'))
+        self.assertTrue(kr.KeyRemapper._URI_SCHEME.match('shell:AppsFolder\\x'))
+        self.assertIsNone(kr.KeyRemapper._URI_SCHEME.match(r'C:\Windows\calc.exe'))
+        self.assertIsNone(kr.KeyRemapper._URI_SCHEME.match('calc.exe'))
+
+    def test_shipped_app_presets_are_usable(self):
+        for name, command in kr.COMMON_APPS:
+            self.assertTrue(name and command, name)
+
+    def test_shipped_target_presets_all_parse(self):
+        for group, items in kr.COMMON_TARGETS:
+            for label, value in items:
+                with self.subTest(group=group, label=label):
+                    self.remapper.parse_key_string(value)
 
 
 class ConfigTests(unittest.TestCase):
@@ -676,7 +893,8 @@ class ConfigTests(unittest.TestCase):
             {f.name for f in dataclasses.fields(kr.CopilotConfig)},
         )
         mapping_fields = {f.name for f in dataclasses.fields(kr.KeyMapping)}
-        saved_mapping_keys = {'source', 'target', 'hold', 'app', 'enabled', 'description'}
+        saved_mapping_keys = {'source', 'target', 'action', 'value', 'hold', 'app',
+                              'enabled', 'description'}
         self.assertEqual(
             mapping_fields - {'source_keys', 'target_keys', 'hold_keys'},
             saved_mapping_keys - {'source', 'target', 'hold'},
@@ -719,6 +937,78 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(kr.copilot_from_dict({"key": "f23"}).key, F23)
         self.assertEqual(kr.copilot_from_dict({"key": F23}).key, F23)
         self.assertEqual(kr.copilot_from_dict({"key": None}).key, kr.DEFAULT_COPILOT_KEY)
+
+
+class SingleInstanceTests(unittest.TestCase):
+    """Only one copy may run - a second one hands over instead of hooking too."""
+
+    def setUp(self):
+        # A private namespace, so these never collide with a copy of the app
+        # the developer happens to have running on this machine
+        self.scope = f"KeyRemapperTest_{os.getpid()}_{id(self)}"
+        self.owner = self.instance()
+        self.addCleanup(self.owner.release)
+
+    def instance(self) -> kr.SingleInstance:
+        made = kr.SingleInstance(scope=self.scope)
+        self.addCleanup(made.release)
+        return made
+
+    def test_first_copy_wins(self):
+        self.assertTrue(self.owner.acquire())
+
+    def test_second_copy_is_turned_away(self):
+        self.owner.acquire()
+        self.assertFalse(self.instance().acquire())
+
+    def test_second_copy_wakes_the_first(self):
+        self.owner.acquire()
+        woken = threading.Event()
+        self.owner.listen(woken.set)
+
+        other = self.instance()
+        other.acquire()
+        self.assertTrue(other.signal_existing())
+        self.assertTrue(woken.wait(timeout=5.0), "the running copy must be told")
+
+    def test_the_signal_can_fire_more_than_once(self):
+        """The event auto-resets, so every later launch reopens the window."""
+        self.owner.acquire()
+        count = []
+        ready = threading.Event()
+
+        def woken():
+            count.append(1)
+            ready.set()
+
+        self.owner.listen(woken)
+        for _ in range(3):
+            ready.clear()
+            other = self.instance()
+            other.acquire()
+            other.signal_existing()
+            self.assertTrue(ready.wait(timeout=5.0))
+            other.release()
+        self.assertEqual(len(count), 3)
+
+    def test_a_rejected_copy_does_not_keep_the_mutex_alive(self):
+        self.owner.acquire()
+        rejected = self.instance()
+        rejected.acquire()
+        rejected.release()
+
+        self.owner.release()
+        self.assertTrue(self.instance().acquire(),
+                        "once the owner exits, the next launch takes over")
+
+    def test_signalling_nobody_is_not_an_error(self):
+        self.owner.acquire()
+        self.assertFalse(self.owner.signal_existing())
+
+    def test_release_is_safe_to_repeat(self):
+        self.owner.acquire()
+        self.owner.release()
+        self.owner.release()
 
 
 if __name__ == '__main__':

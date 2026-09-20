@@ -2,7 +2,7 @@
 
 A robust, gaming-compatible key remapping tool for Windows 11 (also works on Windows 10).
 
-**Version 2.3** | Built by Li Fan, 2025
+**Version 2.4** | Built by Li Fan, 2026
 
 📥 **Download**: Grab `KeyRemapper.exe` from the
 [latest release](https://github.com/linkmodo/key_remapper/releases/latest) — a single file, no
@@ -13,6 +13,26 @@ Runs as a normal user. Administrator rights are only needed if you want it to af
 windows that themselves run elevated (some games, Task Manager, etc.).
 
 > *Created out of frustration at being unable to disable or remap keys within a particular game.*
+
+## ✨ What's New in Version 2.4
+
+- **A key can now launch an app** — set a mapping's action to *Launch a program or
+  app* and pick Calculator, File Explorer, Terminal and friends from a list, browse
+  for any `.exe`, or paste a `shell:AppsFolder\…` link for a Store app.
+  *Open a website* does the same for URLs. See [Launch an app from a key](#-launch-an-app-from-a-key)
+- **A picker for volume, media and function keys** — Mute, Volume Up/Down, Play/Pause,
+  F1–F24, Copy/Paste and the browser keys are two clicks away instead of a name you
+  had to know
+- **Keys with no name are mappable** — 🎯 Detect writes `vk0x5D` for anything exotic
+  your keyboard sends instead of giving up. This is what makes most Fn combinations
+  usable, since Fn itself is invisible — see [The Fn key](#-the-fn-key)
+- **Detect shows the raw hardware code** (`vk 0x7B · scan 0x58`), which is the only way
+  to tell two keys that share a virtual key code apart
+- **Only one copy runs at a time** — launching the app while it sits in the tray reopens
+  that window instead of installing a second keyboard hook
+- **It says when it hides** — minimising to the tray shows a notification once per run,
+  so a hidden app never looks like it crashed
+- **104 unit tests**, up from 58
 
 ## ✨ What's New in Version 2.3
 
@@ -66,12 +86,15 @@ windows that themselves run elevated (some games, Task Manager, etc.).
 - **Modern GUI**: Clean, dark-themed interface built with customtkinter
 - **Gaming Compatible**: Uses low-level Windows hooks (`SetWindowsHookEx`) that work with most games and applications
 - **Key Combinations**: Remap single keys to key combinations (e.g., `F1` → `Ctrl+S`, `F2` → `Ctrl+Shift+S`)
+- **Launch Apps and Websites**: Point a key at Calculator, any `.exe`, a Store app or a URL
+- **Multimedia Keys**: Mute, volume, play/pause, track skip and the browser keys, from a picker
 - **Key Blocking**: Completely disable specific keys to prevent accidental presses during gaming (e.g., block `/` key)
 - **Copilot Key Control**: Detect and repurpose the dedicated Copilot key found on 2024+ laptops
 - **Per-App Profiles**: Limit any rule to a single executable
 - **Dual-Role Keys**: One key that taps one thing and holds another
 - **Pause Hotkey**: Suspend everything without stopping the remapper
 - **Mouse Side Buttons**: `mouse3`/`mouse4`/`mouse5` as remap sources
+- **Single Instance**: a second launch reopens the existing window instead of double-hooking
 - **Interactive Key Detection**: Click 🎯 Detect buttons to capture key presses automatically
 - **System Tray**: Minimize to system tray while remapper runs in the background
 - **Standalone Executable**: Build a single `.exe` file - no Python installation required
@@ -156,6 +179,7 @@ Fair. You have three options, in order of paranoia:
 
    | Release | SHA-256 |
    |---------|---------|
+   | v2.4.0 | `2cb3995c8c40374c681e4a76bd0914e9841721cf86af7ca76ddf64d450a0342b` |
    | v2.3.0 | `883f407b5b61655076cc8e57d2bb50c1d2f74ba9e837bf16b2dfc09e34e4eff9` |
    | v2.2.0 | `44e158dd07c9a9b9d6c1ca109fbe19b2d546778de95515fb5bf35c52805b48a0` |
 
@@ -247,6 +271,73 @@ releasing the still-held Windows key does not open the Start menu, virtually rel
 held modifiers, and only then performs your action — so `Shift`/`Win` never leak into the
 keys it sends.
 
+### ▶ Launch an app from a key
+
+A mapping does not have to send keys. In **Add Mapping**, *What should it do?* offers:
+
+| Action | What you fill in |
+|--------|------------------|
+| **Send other key(s)** | A key or combination — with a picker for volume, media, function and browser keys |
+| **Launch a program or app** | Pick from the common apps list, **📂 Browse** for an `.exe`, or type anything the shell can open |
+| **Open a website** | Any URL — it opens in your default browser |
+
+**▶ Test** runs the action once without pressing the key, so you can check a path
+before committing to it.
+
+Anything these accept:
+
+| You type | What happens |
+|----------|--------------|
+| `calc.exe` | An executable on `PATH` — this one opens the Windows Calculator |
+| `C:\Tools\thing.exe --flag` | A full path, arguments included |
+| `D:\notes\todo.md` | Any document or folder, opened with its default program |
+| `ms-settings:` | A Windows Settings page (`ms-settings:bluetooth`, …) |
+| `shell:AppsFolder\<app-id>` | A Microsoft Store / packaged app |
+
+> To find a Store app's id: run `explorer shell:AppsFolder`, right-click the app →
+> *Create shortcut*, then read the target off the shortcut on your desktop.
+
+So the classic setup — Fn+F12 opens the calculator — is: **Add Mapping** → 🎯 Detect →
+press Fn+F12 → *Launch a program or app* → **Calculator** → **Add**.
+
+Launching happens on a worker thread, never inside the keyboard hook: a low-level hook
+that takes longer than `LowLevelHooksTimeout` is silently removed by Windows.
+
+### ⌨️ The Fn key
+
+**Fn is not supported as a modifier, and it is worth explaining why.**
+
+On the overwhelming majority of keyboards, the Fn key never reaches Windows at all. It is
+handled inside the keyboard's own controller, which simply emits a *different key* for the
+combination. Pressing Fn+F12 does not produce "Fn plus F12" — it produces `volumeup`, or
+plain `f12`, or a code with no name, depending on the hardware. No application can observe
+a key the hardware never sends, and a low-level hook is no exception.
+
+So there is no `fn` you can type in a rule, and 🎯 Detect cannot record Fn on its own.
+**Fn key mapping is limited to what follows.**
+
+**What does work — map what the combination actually sends:**
+
+1. **Add Mapping** → 🎯 **Detect** on the source
+2. Hold **Fn** and tap **F12** — press the whole combination
+3. The dialog records exactly what arrived — `VOLUMEUP`, `F12`, `vk0x97`, … — and shows
+   the raw code underneath (`vk 0x7B · scan 0x58`)
+4. Give it a target or an app, and click **Add**
+
+That covers the common case completely: if Fn+F12 sends `volumeup`, then mapping `volumeup`
+to the Calculator gives you exactly "Fn+F12 opens the Calculator".
+
+**The one case it cannot cover:** if Fn+F12 and a plain F12 arrive as *byte-for-byte the
+same event*, nothing can distinguish them — not this app, not any other. The Detect dialog
+shows the raw code precisely so you can check: press each one and compare. Different codes
+mean you are fine.
+
+#### Keys with no name
+
+Keyboards send codes this app has no friendly name for, especially under Fn. 🎯 Detect
+writes those as `vk0x5D` (or `vk93` — decimal works too) and they can be used anywhere a
+key name can. Nothing your keyboard sends is off-limits.
+
 ### Per-app profiles
 
 Leave **Only in this app** empty and a rule applies everywhere. Fill in an executable name
@@ -330,8 +421,9 @@ Keys can be specified as:
 | Navigation | `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown` |
 | Special | `escape`, `tab`, `capslock`, `space`, `enter`, `backspace`, `delete`, `insert`, `apps` |
 | Numpad | `num0` - `num9`, `numplus`, `numminus`, `nummultiply`, `numdivide` |
-| Media | `playpause`, `nexttrack`, `prevtrack`, `mediastop`, `mute`, `volumeup`, `volumedown`, `calculator`, `mail` |
-| Browser | `browserback`, `browserforward`, `browserrefresh`, `browserhome`, `browsersearch` |
+| Media | `playpause`, `nexttrack`, `prevtrack`, `mediastop`, `mute`, `volumeup`, `volumedown`, `calculator`, `mail`, `mediaselect`, `launchapp1`, `launchapp2`, `sleep` |
+| Browser | `browserback`, `browserforward`, `browserrefresh`, `browserhome`, `browsersearch`, `browserstop`, `browserfavorites` |
+| Raw codes | `vk0x5D` / `vk93` — any key with no friendly name |
 | Mouse (source only) | `mouse3` / `middleclick`, `mouse4`, `mouse5` |
 | Punctuation | `semicolon`, `comma`, `period`, `slash`, `backslash`, `quote`, `grave`, `lbracket`, `rbracket` |
 
@@ -346,6 +438,11 @@ Left/right distinctions still work when the modifier is the key being remapped (
 | `ctrl+j` | `down` | Ctrl+J acts as Down arrow |
 | `f1` | `ctrl+s` | F1 saves the document |
 | `ralt` | `ctrl` | Right Alt acts as Control |
+| `f9` | `mute` | F9 mutes the system volume |
+| `f10` / `f11` | `volumedown` / `volumeup` | Media keys on a keyboard that lacks them |
+| `f12` | launch `calc.exe` | F12 opens the Windows Calculator |
+| `volumeup` | launch `calc.exe` | Whatever Fn+F12 sends on your laptop, repurposed |
+| `mouse5` | open `https://claude.ai` | Side button opens a site |
 
 ### Example Blocked Keys (Gaming)
 
@@ -363,15 +460,27 @@ Everything is saved to `%APPDATA%\KeyRemapper\key_remap_config.json`:
 
 ```json
 {
-    "version": 4,
+    "version": 5,
     "mappings": [
         {
             "source": "CAPSLOCK",
             "target": "ESCAPE",
+            "action": "keys",
+            "value": "",
             "hold": "CTRL",
             "app": "",
             "enabled": true,
             "description": "Caps Lock to Escape"
+        },
+        {
+            "source": "F12",
+            "target": "",
+            "action": "launch",
+            "value": "calc.exe",
+            "hold": "",
+            "app": "",
+            "enabled": true,
+            "description": "Calculator"
         }
     ],
     "blocked_keys": [
@@ -400,8 +509,9 @@ Everything is saved to `%APPDATA%\KeyRemapper\key_remap_config.json`:
 }
 ```
 
-Copilot `mode` is one of `disable`, `keys`, `launch`, `url` or `passthrough`. Older config
-files load unchanged — missing sections fall back to defaults.
+A mapping's `action` is `keys` (send `target`), `launch` or `url` (open `value`).
+Copilot `mode` is one of `disable`, `keys`, `launch`, `url` or `passthrough`.
+Older config files load unchanged — missing fields and sections fall back to defaults.
 
 ## Tests
 
@@ -409,9 +519,10 @@ files load unchanged — missing sections fall back to defaults.
 python -m unittest discover -s tests
 ```
 
-58 tests drive the rule engine directly (no real hooks, no keyboard input needed), covering
+104 tests drive the rule engine directly (no real hooks, no keyboard input needed), covering
 remaps, blocks, per-app scoping, dual-role keys, the pause hotkey, the Copilot chord, the mouse
-hook and config round-tripping.
+hook, app-launching mappings, raw key codes, the single-instance guard and config
+round-tripping — including that configs written by earlier versions still load.
 
 ## Troubleshooting
 
@@ -433,6 +544,27 @@ heuristic entirely.
 
 1. If the game runs elevated, run the remapper as administrator too
 2. Some anti-cheat systems block keyboard hooks - this is by design for security
+
+### Fn+F12 (or any Fn combination) will not detect
+
+Fn is not a modifier this app can see — your keyboard handles it internally and never
+tells Windows. That is normal and it is the majority case. Detect the **combination**
+rather than the Fn key: 🎯 Detect, then hold Fn and tap F12, and whatever your keyboard
+actually sends is recorded and mappable. [Full explanation](#-the-fn-key).
+
+### The app opens and immediately disappears
+
+It did not close — it minimised to the system tray, because **Settings → "Start hidden in
+the system tray"** is ticked. Windows 11 hides new tray icons behind the `^` arrow on the
+taskbar; click it, then drag the K icon onto the taskbar to keep it visible. Untick that
+setting if you would rather see the window on every launch. Launching the app again while
+it is hidden reopens the window rather than starting a second copy.
+
+### The app I launched from a key did not open
+
+1. Click **▶ Test** in the mapping dialog — it runs the same code path and fails the same way
+2. A Store app usually needs `shell:AppsFolder\<app-id>` rather than an `.exe` path
+3. Check `%APPDATA%\KeyRemapper\key_remapper.log` — every launch and every failure is logged
 
 ### Keys not being remapped
 
@@ -466,12 +598,16 @@ heuristic entirely.
 
 - Windows only (uses Windows-specific APIs)
 - Some games with kernel-level anti-cheat may not work
-- Cannot remap mouse buttons (keyboard only)
+- Left and right mouse buttons are deliberately not remappable, and mouse buttons
+  cannot be a target
 - Cannot remap keys used by Windows itself (e.g., Ctrl+Alt+Del)
+- **The Fn key cannot be used as a modifier.** Virtually no keyboard reports it to
+  Windows; map what the combination actually sends instead ([why](#-the-fn-key))
+- Two keys that send an identical virtual key code *and* scan code cannot be told apart
 
 ## Support this project
 
-Built by **Li Fan**, 2025. If Key Remapper saved you some frustration, you're very welcome to
+Built by **Li Fan**, 2026. If Key Remapper saved you some frustration, you're very welcome to
 [buy me a coffee ☕](https://paypal.me/lifan) — there's also a Donate button in the app's
 **ℹ️ About** dialog.
 

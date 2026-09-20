@@ -25,6 +25,7 @@ import os
 from key_remapper import (
     KeyRemapper, CONFIG_FILE, CONFIG_DIR, KEY_NAME_TO_VK, VK_TO_KEY_NAME,
     CopilotConfig, DEFAULT_COPILOT_KEY, Settings,
+    COMMON_APPS, COMMON_TARGETS, vk_name, SingleInstance,
     is_run_at_startup, set_run_at_startup, check_admin, logger,
     __version__, PROJECT_URL, DONATE_URL
 )
@@ -40,6 +41,20 @@ except ImportError:
 # Set appearance
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+
+
+def _window_scaling(widget) -> float:
+    """
+    How many real pixels customtkinter draws per geometry() pixel.
+
+    Sizes passed to geometry() are scaled by this, while winfo_screenheight()
+    reports real pixels - mixing the two silently oversizes windows on a
+    high-DPI display.
+    """
+    try:
+        return ctk.ScalingTracker.get_window_scaling(widget) or 1.0
+    except Exception:
+        return 1.0
 
 
 class AutoHideScrollableFrame(ctk.CTkScrollableFrame):
@@ -143,7 +158,7 @@ class KeyCaptureDialog(UiQueueMixin, ctk.CTkToplevel):
     def __init__(self, parent, title: str = "Press a Key", remapper: KeyRemapper = None):
         super().__init__(parent)
         self.title(title)
-        self.geometry("450x300")
+        self.geometry("470x390")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -155,8 +170,8 @@ class KeyCaptureDialog(UiQueueMixin, ctk.CTkToplevel):
 
         # Center the dialog
         self.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - 450) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 300) // 2
+        x = parent.winfo_x() + (parent.winfo_width() - 470) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 390) // 2
         self.geometry(f"+{x}+{y}")
 
         # UI
@@ -173,7 +188,14 @@ class KeyCaptureDialog(UiQueueMixin, ctk.CTkToplevel):
             font=ctk.CTkFont(size=13),
             text_color="gray"
         )
-        self.detected_label.pack(pady=5)
+        self.detected_label.pack(pady=(5, 0))
+
+        # What the keyboard actually reported - the only way to tell two keys
+        # that share a virtual key code apart
+        self.hardware_label = ctk.CTkLabel(
+            self, text="", font=ctk.CTkFont(size=10), text_color="gray"
+        )
+        self.hardware_label.pack(pady=(0, 4))
 
         if self.remapper:
             self.info_label = ctk.CTkLabel(
@@ -189,6 +211,17 @@ class KeyCaptureDialog(UiQueueMixin, ctk.CTkToplevel):
                 self, text="🎯 Start capturing", command=self._start_low_level_capture, width=170
             )
             self.capture_btn.pack(pady=4)
+
+            # The Fn key cannot be captured on most keyboards - say so here,
+            # where someone is about to try it, rather than letting them guess
+            ctk.CTkLabel(
+                self,
+                text="Using Fn? Press the whole combination (e.g. Fn+F12).\n"
+                     "Fn itself is invisible to Windows on most keyboards, so what\n"
+                     "gets recorded is the key your keyboard actually sends.",
+                font=ctk.CTkFont(size=10), text_color="#f39c12",
+                justify="center", wraplength=430
+            ).pack(pady=(10, 4))
         else:
             self.info_label = ctk.CTkLabel(
                 self,
@@ -222,6 +255,8 @@ class KeyCaptureDialog(UiQueueMixin, ctk.CTkToplevel):
         self.focus_force()
         self._init_ui_queue()
 
+    # --- low-level capture --------------------------------------------
+
     def _start_low_level_capture(self):
         """Swallow all input until one chord is pressed"""
         if self.capturing or not self.remapper:
@@ -229,7 +264,7 @@ class KeyCaptureDialog(UiQueueMixin, ctk.CTkToplevel):
 
         def on_chord(chord):
             # Called on the hook thread - hand back to the UI thread
-            self.post_to_ui(lambda: self._finish_low_level_capture(chord))
+            self.post_to_ui(lambda: self._finish_capture(chord))
 
         if not self.remapper.start_capture(on_chord):
             self.detected_label.configure(text="Could not start capture", text_color="#e74c3c")
@@ -239,21 +274,28 @@ class KeyCaptureDialog(UiQueueMixin, ctk.CTkToplevel):
         self.capture_btn.configure(text="Press keys now… (Esc cancels)", state="disabled")
         self.label.configure(text="Listening…")
 
-    def _finish_low_level_capture(self, chord):
+    def _finish_capture(self, chord):
         self.capturing = False
         if not self.winfo_exists():
             return
-
         self.capture_btn.configure(text="🎯 Start capturing", state="normal")
+        self._finish_low_level_capture(chord)
+
+    def _finish_low_level_capture(self, chord):
         self.label.configure(text="Press any key or key combination...")
 
         if not chord:
             self.detected_label.configure(text="Cancelled", text_color="gray")
             return
 
-        modifiers, vk = chord
-        name = VK_TO_KEY_NAME.get(vk, f"0x{vk:02X}")
-        self.detected_keys = list(modifiers) + [name]
+        self.detected_keys = list(chord.modifiers) + [vk_name(chord.vk)]
+        self.hardware_label.configure(text=f"Keyboard reported {chord.hardware_text()}")
+        self._refresh_detected()
+
+    def _refresh_detected(self):
+        """Redraw the detected combination."""
+        if not self.detected_keys:
+            return
         self.detected_label.configure(
             text=f"Detected: {'+'.join(self.detected_keys)}", text_color="#27ae60"
         )
@@ -268,18 +310,18 @@ class KeyCaptureDialog(UiQueueMixin, ctk.CTkToplevel):
         """Handle key press event"""
         # Get the main key first
         key_name = self._get_key_name(event)
-        
+
         # Skip if no valid key detected
         if not key_name:
             return
-        
+
         # Build key combination
         keys = []
-        
+
         # Check if this is a modifier key being pressed by itself
-        modifier_keys = ["ctrl", "lctrl", "rctrl", "shift", "lshift", "rshift", 
+        modifier_keys = ["ctrl", "lctrl", "rctrl", "shift", "lshift", "rshift",
                         "alt", "lalt", "ralt", "win", "lwin", "rwin"]
-        
+
         if key_name in modifier_keys:
             # Just show the modifier key itself
             keys.append(key_name)
@@ -292,24 +334,23 @@ class KeyCaptureDialog(UiQueueMixin, ctk.CTkToplevel):
             if event.state & 0x20000 or event.state & 0x0008:  # Alt
                 keys.append("alt")
             # Note: Win key state is unreliable in tkinter, so we detect it from keysym
-            
+
             # Add the main key
             keys.append(key_name)
-        
+
         if keys:
             self.detected_keys = keys
-            detected_str = "+".join(keys)
-            self.detected_label.configure(text=f"Detected: {detected_str}", text_color="#27ae60")
-            self.use_btn.configure(state="normal")
-    
+            self.hardware_label.configure(text="")
+            self._refresh_detected()
+
     def _on_key_release(self, event):
         """Handle key release - finalize detection"""
         pass
-    
+
     def _get_key_name(self, event):
         """Convert tkinter key event to our key name format"""
         key = event.keysym.lower()
-        
+
         # Map tkinter key names to our format
         key_map = {
             "control_l": "lctrl", "control_r": "rctrl", "control": "ctrl",
@@ -328,16 +369,16 @@ class KeyCaptureDialog(UiQueueMixin, ctk.CTkToplevel):
             "backslash": "backslash", "apostrophe": "quote",
             "grave": "grave", "minus": "minus", "equal": "equals",
         }
-        
+
         return key_map.get(key, key if len(key) == 1 or key.startswith('f') and key[1:].isdigit() else key)
-    
+
     def _on_manual_entry(self, event):
         """Handle manual entry of key combination"""
         text = self.manual_entry.get().strip()
         if text:
             self.result = text
             self.destroy()
-    
+
     def _use_key(self):
         """Use the detected key combination"""
         if self.detected_keys:
@@ -348,12 +389,23 @@ class KeyCaptureDialog(UiQueueMixin, ctk.CTkToplevel):
 class AddMappingDialog(ctk.CTkToplevel):
     """Dialog to add or edit a key mapping"""
 
+    ACTION_LABELS = {
+        "Send other key(s)": "keys",
+        "Launch a program or app": "launch",
+        "Open a website": "url",
+    }
+
     def __init__(self, parent, remapper: KeyRemapper, existing: dict = None):
         super().__init__(parent)
         self.editing = existing is not None
         self.title("Edit Key Mapping" if self.editing else "Add Key Mapping")
-        self.geometry("440x510")
-        self.resizable(False, False)
+        # Tall enough for the common case, but the body scrolls - a laptop
+        # screen must never hide the Add button. winfo_screenheight() is in
+        # real pixels while geometry() is in scaled ones, hence the division.
+        height = min(660, max(420, int(parent.winfo_screenheight() / _window_scaling(parent)) - 90))
+        self.geometry(f"490x{height}")
+        self.resizable(False, True)
+        self.minsize(490, 380)
         self.transient(parent)
         self.grab_set()
 
@@ -363,73 +415,244 @@ class AddMappingDialog(ctk.CTkToplevel):
 
         # Center
         self.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - 440) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - 510) // 2
+        x = parent.winfo_x() + (parent.winfo_width() - 490) // 2
+        y = max(0, parent.winfo_y() + (parent.winfo_height() - height) // 2)
         self.geometry(f"+{x}+{y}")
 
-        # Source key
-        ctk.CTkLabel(self, text="Source Key (key to remap):", font=ctk.CTkFont(size=13)).pack(pady=(18, 5))
-        source_frame = ctk.CTkFrame(self, fg_color="transparent")
-        source_frame.pack(pady=5)
-        self.source_entry = ctk.CTkEntry(source_frame, width=270, placeholder_text="e.g., capslock, ctrl+a, f1, mouse4")
-        self.source_entry.pack(side="left", padx=(0, 5))
-        ctk.CTkButton(source_frame, text="🎯 Detect", command=self._detect_source, width=60).pack(side="left")
-
-        # Target key
-        ctk.CTkLabel(self, text="Target Key (what it becomes):", font=ctk.CTkFont(size=13)).pack(pady=(12, 5))
-        target_frame = ctk.CTkFrame(self, fg_color="transparent")
-        target_frame.pack(pady=5)
-        self.target_entry = ctk.CTkEntry(target_frame, width=270, placeholder_text="e.g., escape, ctrl+c, shift+f1")
-        self.target_entry.pack(side="left", padx=(0, 5))
-        ctk.CTkButton(target_frame, text="🎯 Detect", command=self._detect_target, width=60).pack(side="left")
-
-        # Hold role
-        ctk.CTkLabel(
-            self, text="When held instead (optional):", font=ctk.CTkFont(size=13)
-        ).pack(pady=(12, 0))
-        ctk.CTkLabel(
-            self, text="Single keys only — e.g. CapsLock taps Escape but acts as Ctrl when held",
-            font=ctk.CTkFont(size=10), text_color="gray"
-        ).pack(pady=(0, 4))
-        hold_frame = ctk.CTkFrame(self, fg_color="transparent")
-        hold_frame.pack(pady=2)
-        self.hold_entry = ctk.CTkEntry(hold_frame, width=270, placeholder_text="e.g., ctrl, shift (leave empty for none)")
-        self.hold_entry.pack(side="left", padx=(0, 5))
-        ctk.CTkButton(hold_frame, text="🎯 Detect", command=self._detect_hold, width=60).pack(side="left")
-
-        # App scope
-        ctk.CTkLabel(self, text="Only in this app (optional):", font=ctk.CTkFont(size=13)).pack(pady=(12, 4))
-        self.app_entry = ctk.CTkEntry(self, width=335, placeholder_text="e.g., game.exe (empty = everywhere)")
-        self.app_entry.pack(pady=2)
-
-        # Description
-        ctk.CTkLabel(self, text="Description (optional):", font=ctk.CTkFont(size=13)).pack(pady=(12, 4))
-        self.desc_entry = ctk.CTkEntry(self, width=335, placeholder_text="e.g., Caps Lock to Escape")
-        self.desc_entry.pack(pady=2)
-
-        # Buttons
+        # Buttons first, pinned to the bottom, so they survive any body height
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(pady=18)
+        btn_frame.pack(side="bottom", pady=14)
 
         ctk.CTkButton(
             btn_frame, text="Save" if self.editing else "Add", command=self._on_add, width=100
         ).pack(side="left", padx=10)
         ctk.CTkButton(btn_frame, text="Cancel", command=self.destroy, width=100).pack(side="left", padx=10)
 
-        if existing:
-            self.source_entry.insert(0, existing.get('source', ''))
-            self.target_entry.insert(0, existing.get('target', ''))
-            self.hold_entry.insert(0, existing.get('hold', ''))
-            self.app_entry.insert(0, existing.get('app', ''))
+        body = AutoHideScrollableFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=4, pady=(8, 0))
+        self.body = body
 
-            # Only carry over a description the user actually wrote - an
-            # auto-generated "x -> y" would go stale the moment they edit
-            description = existing.get('description', '')
-            auto = f"{existing.get('source', '')} -> {existing.get('target', '')}".lower()
-            if description.lower() != auto:
-                self.desc_entry.insert(0, description)
+        # Source key
+        ctk.CTkLabel(body, text="Source Key (key to remap):", font=ctk.CTkFont(size=13)).pack(pady=(4, 4))
+        source_frame = ctk.CTkFrame(body, fg_color="transparent")
+        source_frame.pack(pady=4)
+        self.source_entry = ctk.CTkEntry(source_frame, width=290, placeholder_text="e.g., capslock, ctrl+a, f1, mouse4")
+        self.source_entry.pack(side="left", padx=(0, 5))
+        ctk.CTkButton(source_frame, text="🎯 Detect", command=self._detect_source, width=70).pack(side="left")
 
+        # What it does
+        ctk.CTkLabel(body, text="What should it do?", font=ctk.CTkFont(size=13)).pack(pady=(14, 4))
+        self.action_menu = ctk.CTkOptionMenu(
+            body, values=list(self.ACTION_LABELS.keys()),
+            command=self._on_action_change, width=365
+        )
+        self.action_menu.pack(pady=2)
+
+        # --- Everything below swaps with the chosen action ---
+        self.keys_frame = ctk.CTkFrame(body, fg_color="transparent")
+        self.value_frame = ctk.CTkFrame(body, fg_color="transparent")
+
+        self._build_keys_frame()
+        self._build_value_frame()
+
+        # App scope
+        self.scope_label = ctk.CTkLabel(body, text="Only in this app (optional):", font=ctk.CTkFont(size=13))
+        self.scope_label.pack(pady=(12, 4))
+        self.app_entry = ctk.CTkEntry(body, width=365, placeholder_text="e.g., game.exe (empty = everywhere)")
+        self.app_entry.pack(pady=2)
+
+        # Description
+        self.desc_label = ctk.CTkLabel(body, text="Description (optional):", font=ctk.CTkFont(size=13))
+        self.desc_label.pack(pady=(10, 4))
+        self.desc_entry = ctk.CTkEntry(body, width=365, placeholder_text="e.g., Caps Lock to Escape")
+        self.desc_entry.pack(pady=(2, 10))
+
+        self._load_existing(existing)
         self.source_entry.focus()
+
+    # --- the two interchangeable panels --------------------------------
+
+    def _build_keys_frame(self):
+        """Target keys, a picker of common ones, and the hold role."""
+        frame = self.keys_frame
+
+        ctk.CTkLabel(frame, text="Target Key (what it becomes):", font=ctk.CTkFont(size=13)).pack(pady=(12, 4))
+        target_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        target_frame.pack(pady=2)
+        self.target_entry = ctk.CTkEntry(target_frame, width=290, placeholder_text="e.g., escape, ctrl+c, mute, volumeup")
+        self.target_entry.pack(side="left", padx=(0, 5))
+        ctk.CTkButton(target_frame, text="🎯 Detect", command=self._detect_target, width=70).pack(side="left")
+
+        # Ready-made targets - volume, media, function keys and friends
+        picker = ctk.CTkFrame(frame, fg_color="transparent")
+        picker.pack(pady=(6, 2))
+
+        self._target_groups = {name: items for name, items in COMMON_TARGETS}
+        self.target_group_menu = ctk.CTkOptionMenu(
+            picker, values=list(self._target_groups), width=150,
+            command=self._on_target_group_change, fg_color="#3b5a70", button_color="#2c5d7c"
+        )
+        self.target_group_menu.pack(side="left", padx=(0, 5))
+
+        self.target_key_menu = ctk.CTkOptionMenu(
+            picker, values=["—"], width=205, command=self._on_target_preset_change,
+            fg_color="#3b5a70", button_color="#2c5d7c"
+        )
+        self.target_key_menu.pack(side="left")
+        self._on_target_group_change(next(iter(self._target_groups)))
+
+        # Hold role
+        ctk.CTkLabel(frame, text="When held instead (optional):", font=ctk.CTkFont(size=13)).pack(pady=(12, 0))
+        ctk.CTkLabel(
+            frame, text="Single keys only — e.g. CapsLock taps Escape but acts as Ctrl when held",
+            font=ctk.CTkFont(size=10), text_color="gray"
+        ).pack(pady=(0, 4))
+        hold_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        hold_frame.pack(pady=2)
+        self.hold_entry = ctk.CTkEntry(hold_frame, width=290, placeholder_text="e.g., ctrl, shift (leave empty for none)")
+        self.hold_entry.pack(side="left", padx=(0, 5))
+        ctk.CTkButton(hold_frame, text="🎯 Detect", command=self._detect_hold, width=70).pack(side="left")
+
+    def _build_value_frame(self):
+        """A program to launch, or a website to open."""
+        frame = self.value_frame
+
+        self.value_label = ctk.CTkLabel(frame, text="Program or app:", font=ctk.CTkFont(size=13))
+        self.value_label.pack(pady=(12, 4))
+
+        row = ctk.CTkFrame(frame, fg_color="transparent")
+        row.pack(pady=2)
+        self.value_entry = ctk.CTkEntry(row, width=225, placeholder_text=r"e.g., calc.exe or C:\Tools\thing.exe")
+        self.value_entry.pack(side="left", padx=(0, 5))
+        self.browse_btn = ctk.CTkButton(row, text="📂 Browse", command=self._browse_value, width=80)
+        self.browse_btn.pack(side="left", padx=(0, 5))
+        ctk.CTkButton(
+            row, text="▶ Test", command=self._test_value, width=70,
+            fg_color="#7f8c8d", hover_color="#95a5a6"
+        ).pack(side="left")
+
+        self.app_preset_label = ctk.CTkLabel(
+            frame, text="Or pick one:", font=ctk.CTkFont(size=11), text_color="gray"
+        )
+        self.app_preset_label.pack(pady=(8, 2))
+
+        self._app_commands = {name: command for name, command in COMMON_APPS}
+        self.app_preset_menu = ctk.CTkOptionMenu(
+            frame, values=list(self._app_commands), width=365,
+            command=self._on_app_preset_change,
+            fg_color="#3b5a70", button_color="#2c5d7c"
+        )
+        self.app_preset_menu.set("Calculator")
+        self.app_preset_menu.pack(pady=2)
+
+        self.value_hint = ctk.CTkLabel(
+            frame,
+            text="Store apps work too — paste a shell:AppsFolder\\… or ms-settings: link.",
+            font=ctk.CTkFont(size=10), text_color="gray", wraplength=400
+        )
+        self.value_hint.pack(pady=(6, 2))
+
+    # --- mode switching -------------------------------------------------
+
+    def _current_action(self) -> str:
+        return self.ACTION_LABELS.get(self.action_menu.get(), "keys")
+
+    def _on_action_change(self, _label=None):
+        action = self._current_action()
+
+        self.keys_frame.pack_forget()
+        self.value_frame.pack_forget()
+
+        if action == "keys":
+            self.keys_frame.pack(before=self.scope_label, fill="x")
+            self._refresh_body()
+            return
+
+        self.value_frame.pack(before=self.scope_label, fill="x")
+        self._refresh_body()
+        if action == "launch":
+            self.value_label.configure(text="Program or app:")
+            self.value_entry.configure(placeholder_text=r"e.g., calc.exe or C:\Tools\thing.exe")
+            self.browse_btn.configure(state="normal")
+            self.app_preset_label.pack(pady=(8, 2))
+            self.app_preset_menu.pack(pady=2)
+            self.value_hint.configure(
+                text="Store apps work too — paste a shell:AppsFolder\\… or ms-settings: link."
+            )
+        else:
+            self.value_label.configure(text="Website:")
+            self.value_entry.configure(placeholder_text="e.g., claude.ai")
+            self.browse_btn.configure(state="disabled")
+            self.app_preset_label.pack_forget()
+            self.app_preset_menu.pack_forget()
+            self.value_hint.configure(text="Opens in your default browser.")
+
+    def _refresh_body(self):
+        """The body grew or shrank, so the scrollbar may have to appear."""
+        self.after(60, self.body._refresh_scrollbar)
+
+    def _on_target_group_change(self, group: str):
+        items = self._target_groups.get(group, [])
+        labels = [label for label, _ in items] or ["—"]
+        self.target_key_menu.configure(values=labels)
+        self.target_key_menu.set(labels[0])
+
+    def _on_target_preset_change(self, label: str):
+        group = self._target_groups.get(self.target_group_menu.get(), [])
+        value = next((v for name, v in group if name == label), None)
+        if value:
+            self.target_entry.delete(0, 'end')
+            self.target_entry.insert(0, value)
+
+    def _on_app_preset_change(self, name: str):
+        command = self._app_commands.get(name)
+        if command:
+            self.value_entry.delete(0, 'end')
+            self.value_entry.insert(0, command)
+
+    def _browse_value(self):
+        filepath = filedialog.askopenfilename(
+            title="Choose a program or file",
+            filetypes=[("Programs", "*.exe;*.bat;*.cmd;*.lnk"), ("All files", "*.*")]
+        )
+        if filepath:
+            self.value_entry.delete(0, 'end')
+            self.value_entry.insert(0, filepath)
+
+    def _test_value(self):
+        value = self.value_entry.get().strip()
+        if not value:
+            messagebox.showinfo("Nothing to test", "Fill in a program or website first.")
+            return
+        self.remapper.run_action(self._current_action(), value)
+
+    # --- loading / saving ----------------------------------------------
+
+    def _load_existing(self, existing: dict):
+        if not existing:
+            self._on_action_change()
+            return
+
+        action = existing.get('action', 'keys')
+        self.action_menu.set(next(
+            (label for label, value in self.ACTION_LABELS.items() if value == action),
+            next(iter(self.ACTION_LABELS))
+        ))
+        self._on_action_change()
+
+        self.source_entry.insert(0, existing.get('source', ''))
+        self.target_entry.insert(0, existing.get('target', ''))
+        self.hold_entry.insert(0, existing.get('hold', ''))
+        self.value_entry.insert(0, existing.get('value', ''))
+        self.app_entry.insert(0, existing.get('app', ''))
+
+        # Only carry over a description the user actually wrote - an
+        # auto-generated "x -> y" would go stale the moment they edit
+        description = existing.get('description', '')
+        auto = f"{existing.get('source', '')} -> " \
+               f"{existing.get('value') or existing.get('target', '')}".lower()
+        if description.lower() != auto:
+            self.desc_entry.insert(0, description)
 
     def _detect_into(self, entry, title):
         dialog = KeyCaptureDialog(self, title)
@@ -451,14 +674,26 @@ class AddMappingDialog(ctk.CTkToplevel):
         self._detect_into(self.hold_entry, "Detect Hold Key")
 
     def _on_add(self):
+        action = self._current_action()
         source = self.source_entry.get().strip()
-        target = self.target_entry.get().strip()
-        hold = self.hold_entry.get().strip()
+        target = self.target_entry.get().strip() if action == "keys" else ""
+        hold = self.hold_entry.get().strip() if action == "keys" else ""
+        value = self.value_entry.get().strip() if action != "keys" else ""
         app = self.app_entry.get().strip()
         desc = self.desc_entry.get().strip()
 
-        if not source or not target:
-            messagebox.showerror("Error", "Please enter both source and target keys.")
+        if not source:
+            messagebox.showerror("Error", "Please enter a source key.")
+            return
+        if action == "keys" and not target:
+            messagebox.showerror("Error", "Please enter a target key.")
+            return
+        if action != "keys" and not value:
+            messagebox.showerror(
+                "Error",
+                "Please choose a program to launch." if action == "launch"
+                else "Please enter a website address."
+            )
             return
 
         ignore = None
@@ -479,8 +714,9 @@ class AddMappingDialog(ctk.CTkToplevel):
         if self.editing:
             self.remapper.remove_mapping(self.original['source'], self.original.get('app', ''))
 
-        if self.remapper.add_mapping(source, target, desc, hold=hold, app=app):
-            self.result = (source, target, desc)
+        if self.remapper.add_mapping(source, target, desc, hold=hold, app=app,
+                                     action=action, value=value):
+            self.result = (source, target or value, desc)
             self.destroy()
         else:
             if self.editing:
@@ -488,13 +724,15 @@ class AddMappingDialog(ctk.CTkToplevel):
                 self.remapper.add_mapping(
                     self.original['source'], self.original['target'],
                     self.original.get('description', ''),
-                    hold=self.original.get('hold', ''), app=self.original.get('app', '')
+                    hold=self.original.get('hold', ''), app=self.original.get('app', ''),
+                    action=self.original.get('action', 'keys'),
+                    value=self.original.get('value', ''),
                 )
             messagebox.showerror(
                 "Error",
                 "Could not create that mapping.\n\n"
                 "Check the key names (see 📋 Show Keys). Hold actions only work\n"
-                "on single keys, not on combinations."
+                "on single keys, and only when the mapping sends keys."
             )
 
 
@@ -593,6 +831,9 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         self.geometry("760x640")
         self.minsize(640, 540)
         self.tray_icon = None
+        # The tray icon is easy to miss - Windows 11 hides new ones in the
+        # overflow menu - so say so once per run rather than looking like a crash
+        self._tray_announced = False
         self._init_ui_queue()
 
         # Initialize remapper
@@ -1176,15 +1417,15 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         if not chord:
             return
 
-        modifiers, vk = chord
-        self._copilot_modifiers = modifiers
-        self._copilot_key = vk
+        self._copilot_modifiers = chord.modifiers
+        self._copilot_key = chord.vk
         self._apply_copilot()
 
         managed = self.remapper.copilot.enabled
         messagebox.showinfo(
             "Copilot Key Detected",
-            f"Your Copilot key sends:\n\n{self.remapper.copilot.chord_text()}\n\n" +
+            f"Your Copilot key sends:\n\n{self.remapper.copilot.chord_text()}\n"
+            f"({chord.hardware_text()})\n\n" +
             ("It is now managed by Key Remapper."
              if managed else
              "Now pick what it should do below and click Apply.")
@@ -1432,8 +1673,10 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             # Arrow
             ctk.CTkLabel(row, text="→", width=20).pack(side="left")
 
-            # Target
-            ctk.CTkLabel(row, text=m['target'], width=110).pack(side="left", padx=5)
+            # Target - the keys it sends, or the app/site it opens
+            ctk.CTkLabel(
+                row, text=m['display_target'], width=110, anchor="w"
+            ).pack(side="left", padx=5)
 
             # Hold role
             ctk.CTkLabel(row, text=m['hold'] or "-", width=70,
@@ -1712,15 +1955,26 @@ NOTE: The Copilot key sends shift+win+f23 on nearly every laptop.
 
 MODIFIERS: ctrl, lctrl, rctrl, shift, lshift, rshift, alt, lalt, ralt, win, lwin, rwin
 
+THE Fn KEY: not supported as a modifier. Almost no keyboard
+      sends Fn to Windows - it is handled inside the keyboard,
+      which sends a different key for the combination instead.
+      So there is no "fn" you can type in a rule. Press the
+      WHOLE combination during 🎯 Detect (hold Fn, tap F12)
+      and whatever your keyboard really sends is recorded -
+      that is what you map. Fn key mapping is limited to this.
+
 NAVIGATION: up, down, left, right, home, end, pageup, pagedown
 
 SPECIAL KEYS: escape, esc, tab, capslock, caps, space, enter, return, backspace, delete, insert, apps (menu key)
 
 NUMPAD: num0-num9, numplus, numminus, nummultiply, numdivide, numdecimal
 
-MEDIA: playpause, nexttrack, prevtrack, mediastop, mute, volumeup, volumedown, calculator, mail
+MEDIA: playpause, nexttrack, prevtrack, mediastop, mute, volumeup, volumedown, calculator, mail, mediaselect, launchapp1, launchapp2, sleep
 
-BROWSER: browserback, browserforward, browserrefresh, browserhome, browsersearch
+BROWSER: browserback, browserforward, browserrefresh, browserhome, browsersearch, browserstop, browserfavorites
+
+RAW CODES: vk0x5D or vk93 - any key your keyboard sends that
+      has no friendly name. 🎯 Detect writes these for you.
 
 MOUSE (source only): mouse3 / middleclick, mouse4, mouse5
       Left and right click cannot be remapped, and mouse
@@ -1735,6 +1989,15 @@ Use + to combine keys, e.g.:
   ctrl+shift+escape
   alt+tab
   win+shift+f23 (Copilot key)
+
+LAUNCHING APPS INSTEAD OF SENDING KEYS
+A mapping does not have to send keys. Set "What should it
+do?" to "Launch a program or app" and pick one, or paste:
+  calc.exe                     an executable on PATH
+  C:\\Tools\\thing.exe          a full path
+  ms-settings:                 a Windows settings page
+  shell:AppsFolder\\<app-id>    a Microsoft Store app
+"Open a website" takes any URL.
 """
         text.insert("1.0", content)
         text.configure(state="disabled")
@@ -1775,56 +2038,81 @@ Use + to combine keys, e.g.:
         about_text = """WHAT THIS APP DOES
 ═══════════════════════════════════════
 
-Key Remapper rewrites your keyboard at the lowest
-level Windows allows, so it works in games and
-applications that ignore normal remapping tools.
+Key Remapper rewrites your keyboard at the lowest level
+Windows allows, so it keeps working in games and apps
+that ignore ordinary remapping tools.
 
-It can:
-  • Turn any key into any other key or combination
-  • Disable keys completely so they cannot misfire
-  • Take control of the Copilot key on modern laptops
-  • Apply rules only inside one application
-  • Give one key two jobs - tap and hold
-  • Use your mouse side buttons as extra keys
+A key can:
+  • Become any other key or combination
+  • Launch a program, app, file or website
+  • Send volume, media and browser keys
+  • Do nothing at all, so it cannot misfire
+  • Do one thing tapped and another held
+  • Behave differently inside one application
 
-COPILOT KEY
-───────────
-The Copilot key is not a real key - the keyboard
-firmware sends SHIFT+WIN+F23 (on most laptops).
-That is why blocking F23 alone does nothing, and why
-letting go of the key can open the Start menu.
+GETTING STARTED
+───────────────
+  1. "Key Mappings" tab → "+ Add Mapping"
+  2. Click 🎯 Detect and press the key you want to
+     change (or type its name)
+  3. Choose what it should do: send keys, launch an
+     app, or open a website
+  4. Click "Add" — the rule is saved immediately
+  5. Click "▶ Start" at the top to make it live
 
-Open the "Copilot Key" tab to:
-  • 🎯 Detect exactly what your keyboard sends
-  • Give back the key it replaced: Right Alt,
-    Windows, Menu or Right Ctrl - one click each
-  • Disable it completely
-  • Send different keys instead
-  • Launch a program, file or website
+The status light shows where you are:
+  🔴 STOPPED  nothing is intercepted
+  🟢 ACTIVE   your rules are running
+  🟠 PAUSED   rules suspended, hook still installed
 
-KEY MAPPINGS (Remap Keys)
-─────────────────────────
-Remap any key to another key or key combination.
+THE FOUR TABS
+─────────────
+  Key Mappings  turn keys into other keys or actions
+  Blocked Keys  disable keys outright
+  Copilot Key   repurpose the dedicated Copilot key
+  Settings      pause hotkey, startup, reset
 
+KEY MAPPINGS
+────────────
 Examples:
-  • CapsLock → Escape (great for Vim users)
+  • CapsLock → Escape (a favourite among Vim users)
   • F1 → Ctrl+S (quick save)
+  • F9 → Mute, F10/F11 → Volume down/up
   • Mouse4 → Ctrl+C (side button copies)
+Double-click any row later to edit it, or select it
+and use "Remove Selected" / "Toggle On/Off".
 
-To add a mapping:
-  1. Click "Add Mapping"
-  2. Click 🎯 Detect, or type the key name
-  3. Click "Add" - it saves automatically
-Double-click any row later to edit it.
+LAUNCH AN APP FROM A KEY
+──────────────────────
+"What should it do?" offers three things:
+  • Send other key(s) — the classic remap, with a
+    picker for volume, media, function and browser keys
+  • Launch a program or app — pick Calculator,
+    Explorer, Terminal and friends, browse for an .exe,
+    or paste shell:AppsFolder\\… for a Store app
+  • Open a website — any URL, in your default browser
+▶ Test runs it once without pressing the key, so you
+can check a path before you commit to it.
 
-BLOCKED KEYS (Disable Keys)
-───────────────────────────
-Completely disable keys to prevent accidental presses.
-
-Examples:
+BLOCKED KEYS
+────────────
+Completely disable keys to prevent accidental presses:
   • Block "/" to stop chat opening mid-game
   • Block "win" so you never minimise a fullscreen game
   • Block "escape" to avoid the pause menu
+
+COPILOT KEY
+───────────
+The Copilot key is not a real key — the keyboard
+firmware sends SHIFT+WIN+F23 on most laptops. That is
+why blocking F23 alone does nothing, and why releasing
+the key can pop the Start menu.
+
+The "Copilot Key" tab lets you:
+  • 🎯 Detect exactly what your keyboard sends
+  • Give back the key it replaced: Right Alt, Windows,
+    Menu or Right Ctrl — one click each
+  • Disable it, send other keys, or launch something
 
 PER-APP PROFILES
 ────────────────
@@ -1848,17 +2136,53 @@ KEY DETECTION
 ─────────────
 Click 🎯 Detect, then press the keys you want. Every
 keystroke is intercepted until you do, so Windows-key
-and Copilot combinations are captured correctly.
+and Copilot combinations are captured correctly. The
+dialog also shows the raw code your keyboard sent, and
+writes vk0x5D for keys that have no friendly name.
+
+⚠ THE Fn KEY — PLEASE READ
+───────────────────────
+On the overwhelming majority of keyboards, Fn never
+reaches Windows at all. It is handled inside the
+keyboard controller, which simply sends a different
+key for the combination. No application can see a key
+the hardware never sends, so:
+
+  • Fn cannot be used as a modifier like Ctrl or Shift
+  • 🎯 Detect cannot record "Fn" on its own
+  • Fn key mapping is therefore very limited
+
+What does work: press the WHOLE combination during
+🎯 Detect. Hold Fn and tap F12, and whatever your
+keyboard truly sends is recorded — often a media key
+such as VOLUMEUP, sometimes plain F12, sometimes a raw
+code like vk0x97. Map that, and it behaves exactly as
+you wanted. If Fn+F12 records as plain "F12", then your
+keyboard is sending the two presses identically and
+they cannot be told apart.
+
+SYSTEM TRAY
+───────────
+Closing the window keeps the remapper running in the
+system tray. Windows 11 hides new tray icons behind
+the "^" arrow on the taskbar — drag the K icon out to
+keep it in view. Click the icon to reopen this window,
+or right-click it for Pause / Resume and Exit.
+
+Starting the app again while it is hidden reopens the
+window instead of launching a second copy.
 
 SUPPORTED KEYS
 ──────────────
-• Letters: a-z          • Numbers: 0-9
-• Function keys: f1-f24 (including F13-F24)
-• Modifiers: ctrl, shift, alt, win
-• Special: escape, tab, space, enter, apps, etc.
-• Media: playpause, mute, volumeup, calculator, ...
-• Mouse: mouse3, mouse4, mouse5 (as a source)
-• Combinations: ctrl+a, win+shift+f23, etc.
+  • Letters: a-z          • Numbers: 0-9
+  • Function keys: f1-f24 (including F13-F24)
+  • Modifiers: ctrl, shift, alt, win
+  • Special: escape, tab, space, enter, apps, etc.
+  • Media: playpause, mute, volumeup, calculator, ...
+  • Mouse: mouse3, mouse4, mouse5 (as a source)
+  • Raw codes: vk0x5D, for keys with no name
+  • Combinations: ctrl+a, win+shift+f23, etc.
+See "📋 Show Keys" for the full list.
 
 STARTING OVER
 ─────────────
@@ -1867,16 +2191,16 @@ every rule and restores the original settings.
 
 IMPORTANT NOTES
 ───────────────
-• Changes are saved automatically
-• Click "Start" to activate your mappings
-• Runs fine as a normal user. Administrator rights are
-  only needed to affect windows that run elevated
-  (some games, Task Manager, etc.)
-• Close to system tray to keep running in background
+  • Changes are saved automatically
+  • Click "▶ Start" to activate your mappings
+  • Runs fine as a normal user. Administrator rights
+    are only needed to affect windows that themselves
+    run elevated (some games, Task Manager, etc.)
+  • Your keystrokes are never recorded anywhere
 
 ═══════════════════════════════════════
 
-Built by Li Fan, 2025
+Built by Li Fan, 2026
 Source, releases and issues:
 {project_url}
 
@@ -2032,9 +2356,36 @@ welcome to buy me a coffee - the button is below.
         # Hide window and run tray icon
         self.withdraw()
         
+        def on_ready(icon):
+            # Runs once the icon actually exists, which notify() requires
+            icon.visible = True
+            if self._tray_announced:
+                return
+            self._tray_announced = True
+            try:
+                icon.notify(
+                    "Key Remapper is still running, hidden here in the system tray.\n"
+                    "Click this icon to reopen the window.",
+                    "Key Remapper"
+                )
+            except Exception:
+                # Notifications can be turned off system-wide; never fail over it
+                logger.debug("Could not show the tray notification", exc_info=True)
+
         # Run tray icon in a separate thread
-        tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
+        tray_thread = threading.Thread(
+            target=lambda: self.tray_icon.run(setup=on_ready), daemon=True
+        )
         tray_thread.start()
+
+    def bring_to_front(self):
+        """Show the window again - called when a second copy of the app starts."""
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                logger.debug("Could not stop the tray icon", exc_info=True)
+        self._restore_from_tray()
     
     def _restore_from_tray(self):
         """Restore window from system tray"""
@@ -2048,8 +2399,20 @@ welcome to buy me a coffee - the button is below.
 def main():
     """Main entry point"""
     start_minimized = "--minimized" in sys.argv
+
+    # A second copy would install its own keyboard hook on top of the first.
+    # Hand over to the instance that is already running instead.
+    instance = SingleInstance()
+    if not instance.acquire():
+        instance.signal_existing()
+        return
+
     app = KeyRemapperGUI(start_minimized=start_minimized)
-    app.mainloop()
+    instance.listen(lambda: app.post_to_ui(app.bring_to_front))
+    try:
+        app.mainloop()
+    finally:
+        instance.release()
 
 
 if __name__ == "__main__":

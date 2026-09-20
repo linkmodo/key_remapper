@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -63,7 +64,7 @@ INPUT_KEYBOARD = 1
 DUMMY_KEY = 0xFF
 
 APP_NAME = "KeyRemapper"
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 # Where users can find the project and support it
 PROJECT_URL = "https://github.com/linkmodo/key_remapper"
@@ -297,11 +298,15 @@ KEY_NAME_TO_VK: Dict[str, int] = {
     'volumedown': VirtualKey.VK_VOLUME_DOWN, 'volumeup': VirtualKey.VK_VOLUME_UP,
     'nexttrack': VirtualKey.VK_MEDIA_NEXT_TRACK, 'prevtrack': VirtualKey.VK_MEDIA_PREV_TRACK,
     'mediastop': VirtualKey.VK_MEDIA_STOP, 'playpause': VirtualKey.VK_MEDIA_PLAY_PAUSE,
+    'mediaselect': VirtualKey.VK_LAUNCH_MEDIA_SELECT,
     'calculator': VirtualKey.VK_LAUNCH_APP2, 'mail': VirtualKey.VK_LAUNCH_MAIL,
+    'launchapp1': VirtualKey.VK_LAUNCH_APP1, 'launchapp2': VirtualKey.VK_LAUNCH_APP2,
+    'sleep': VirtualKey.VK_SLEEP,
     # Browser
     'browserback': VirtualKey.VK_BROWSER_BACK, 'browserforward': VirtualKey.VK_BROWSER_FORWARD,
     'browserrefresh': VirtualKey.VK_BROWSER_REFRESH, 'browserhome': VirtualKey.VK_BROWSER_HOME,
-    'browsersearch': VirtualKey.VK_BROWSER_SEARCH,
+    'browsersearch': VirtualKey.VK_BROWSER_SEARCH, 'browserstop': VirtualKey.VK_BROWSER_STOP,
+    'browserfavorites': VirtualKey.VK_BROWSER_FAVORITES,
     # Mouse buttons usable as a *source* only. Left and right are deliberately
     # absent: remapping them can leave you unable to click your way out.
     'middleclick': VirtualKey.VK_MBUTTON, 'mouse3': VirtualKey.VK_MBUTTON,
@@ -342,8 +347,105 @@ FAMILY_GENERIC_VK: Dict[str, int] = {
 
 MODIFIER_VKS: Set[int] = set(MODIFIER_FAMILY)
 
+# The Fn key is deliberately absent. On the overwhelming majority of laptops
+# the keyboard controller handles Fn itself and Windows never receives it at
+# all - it simply receives a *different* key for the combination. There is no
+# hook, driver-free or otherwise, that can see a key the hardware never sends,
+# so rather than offer an "fn" modifier that silently never matches, the app
+# records whatever the combination really produces. See FN_KEY_NOTICE.
+FN_KEY_NOTICE = (
+    "Most keyboards never send the Fn key to Windows - the keyboard handles it "
+    "internally and sends a different key for the combination. So Fn cannot be "
+    "used as a modifier on its own. Press the whole combination (Fn+F12) during "
+    "detection instead: whatever your keyboard really sends is recorded, and that "
+    "can be mapped to anything."
+)
+
+# Programs worth offering in one click. The value is whatever _launch accepts:
+# an executable on PATH, a full path, or a protocol URI for a packaged app.
+COMMON_APPS: List[Tuple[str, str]] = [
+    ("Calculator", "calc.exe"),
+    ("File Explorer", "explorer.exe"),
+    ("Notepad", "notepad.exe"),
+    ("Snipping Tool", "ms-screenclip:"),
+    ("Windows Terminal", "wt.exe"),
+    ("Command Prompt", "cmd.exe"),
+    ("Task Manager", "taskmgr.exe"),
+    ("Settings", "ms-settings:"),
+    ("Paint", "mspaint.exe"),
+    ("Character Map", "charmap.exe"),
+    ("Control Panel", "control.exe"),
+    ("Registry Editor", "regedit.exe"),
+]
+
+# Ready-made targets for the "send key(s)" action, grouped for the picker.
+# Every value goes through parse_key_string, so these are just key names.
+COMMON_TARGETS: List[Tuple[str, List[Tuple[str, str]]]] = [
+    ("Volume & media", [
+        ("Mute", "mute"),
+        ("Volume up", "volumeup"),
+        ("Volume down", "volumedown"),
+        ("Play / Pause", "playpause"),
+        ("Next track", "nexttrack"),
+        ("Previous track", "prevtrack"),
+        ("Stop", "mediastop"),
+        ("Calculator key", "calculator"),
+        ("Mail key", "mail"),
+    ]),
+    ("Function keys", [(f"F{n}", f"f{n}") for n in range(1, 25)]),
+    ("Editing", [
+        ("Copy", "ctrl+c"),
+        ("Cut", "ctrl+x"),
+        ("Paste", "ctrl+v"),
+        ("Undo", "ctrl+z"),
+        ("Redo", "ctrl+y"),
+        ("Save", "ctrl+s"),
+        ("Select all", "ctrl+a"),
+        ("Find", "ctrl+f"),
+    ]),
+    ("Windows", [
+        ("Screenshot region", "win+shift+s"),
+        ("Lock screen", "win+l"),
+        ("Show desktop", "win+d"),
+        ("Emoji picker", "win+period"),
+        ("Task view", "win+tab"),
+        ("Clipboard history", "win+v"),
+        ("Menu key", "apps"),
+        ("Escape", "escape"),
+    ]),
+    ("Browser", [
+        ("Back", "browserback"),
+        ("Forward", "browserforward"),
+        ("Refresh", "browserrefresh"),
+        ("Home", "browserhome"),
+        ("Search", "browsersearch"),
+    ]),
+]
+
+
 # A combination is matched as (set-of-modifier-families, main key code)
 Signature = Tuple[frozenset, int]
+
+
+# The order modifiers are written in, so two ways of typing the same chord
+# still read the same. Fn comes first because that is how it sits on a keyboard.
+MODIFIER_ORDER: Dict[str, int] = {'ctrl': 0, 'alt': 1, 'shift': 2, 'win': 3}
+
+
+def vk_name(vk: int) -> str:
+    """
+    Name for a virtual key code, always parseable by parse_key_string.
+
+    Codes with no friendly name become ``vk0x5D``. Keyboards do emit keys we
+    have no name for - especially under Fn - and they should still be mappable.
+    """
+    name = VK_TO_KEY_NAME.get(vk)
+    return name if name else f"vk0x{vk:02X}"
+
+
+def sort_modifiers(families) -> List[str]:
+    """Modifier family names in a stable, keyboard-shaped order."""
+    return sorted(set(families), key=lambda m: MODIFIER_ORDER.get(m, 9))
 
 
 def combo_signature(vk_codes: Tuple[int, ...]) -> Signature:
@@ -452,6 +554,11 @@ HOOKPROC = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, ctypes
 MOUSEHOOKPROC = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, ctypes.POINTER(MSLLHOOKSTRUCT))
 
 
+# What a mapping does when it fires. "keys" sends target_keys; "launch" starts
+# a program, file or shell command; "url" opens a web address.
+MAPPING_ACTIONS = ("keys", "launch", "url")
+
+
 @dataclass
 class KeyMapping:
     """Represents a key mapping configuration"""
@@ -459,6 +566,10 @@ class KeyMapping:
     target_keys: Tuple[int, ...]  # Target key(s) - tuple of VK codes
     enabled: bool = True
     description: str = ""
+    # What the key does: send keys, or launch a program / open a URL
+    action: str = "keys"
+    # Program, file, shell command or URL - used when action is not "keys"
+    value: str = ""
     # Optional second role: what the key does when held down instead of tapped
     # (e.g. CapsLock -> Escape on tap, Ctrl while held)
     hold_keys: Tuple[int, ...] = ()
@@ -484,6 +595,25 @@ class Settings:
     run_at_startup: bool = False
     start_minimized: bool = False
     start_on_launch: bool = False    # activate the remapper as soon as the app opens
+
+
+@dataclass(frozen=True)
+class CapturedChord:
+    """One key press recorded by the 🎯 Detect feature."""
+    modifiers: Tuple[str, ...] = ()
+    vk: int = 0
+    scan_code: int = 0
+
+    def key_string(self) -> str:
+        """The chord as a rule would spell it, e.g. ``fn+f12``."""
+        return '+'.join(sort_modifiers(self.modifiers) + [vk_name(self.vk)])
+
+    def hardware_text(self) -> str:
+        """What the keyboard actually reported - shown for diagnosis."""
+        return f"vk 0x{self.vk:02X} · scan 0x{self.scan_code:02X}"
+
+    def is_named_key(self) -> bool:
+        return self.vk in VK_TO_KEY_NAME
 
 
 @dataclass
@@ -535,9 +665,7 @@ class CopilotConfig:
 
     def chord_text(self) -> str:
         """Human readable chord, e.g. 'SHIFT+WIN+F23'."""
-        order = {'ctrl': 0, 'alt': 1, 'shift': 2, 'win': 3}
-        parts = sorted(self.modifiers, key=lambda m: order.get(m, 9))
-        parts.append(VK_TO_KEY_NAME.get(self.key, f"0x{self.key:02X}"))
+        parts = sort_modifiers(self.modifiers) + [vk_name(self.key)]
         return '+'.join(p.upper() for p in parts)
 
     def action_text(self) -> str:
@@ -781,8 +909,19 @@ class KeyRemapper:
 
             if part in KEY_NAME_TO_VK:
                 keys.append(KEY_NAME_TO_VK[part])
-            else:
-                raise ValueError(f"Unknown key: '{part}'. Use 'list' command to see available keys.")
+                continue
+
+            # Raw code, as produced by vk_name() for keys we have no name for.
+            # Accepts vk0x5D and vk93 alike.
+            match = re.fullmatch(r'vk(0x[0-9a-f]+|\d+)', part)
+            if match:
+                code = int(match.group(1), 0)
+                if not 0 < code <= 0xFF:
+                    raise ValueError(f"Key code out of range: '{part}' (use 0x01-0xFF)")
+                keys.append(code)
+                continue
+
+            raise ValueError(f"Unknown key: '{part}'. Use 'list' command to see available keys.")
 
         if not keys:
             raise ValueError("No valid keys specified")
@@ -795,11 +934,15 @@ class KeyRemapper:
 
     def vk_to_string(self, vk_codes: Tuple[int, ...]) -> str:
         """Convert VK codes back to a readable string"""
-        names = []
-        for vk in vk_codes:
-            name = VK_TO_KEY_NAME.get(vk, f"0x{vk:02X}")
-            names.append(name.upper())
-        return '+'.join(names)
+        return '+'.join(vk_name(vk).upper() for vk in vk_codes)
+
+    def target_text(self, mapping: KeyMapping) -> str:
+        """Readable description of what a mapping does, for lists and warnings."""
+        if mapping.action == "launch":
+            return f"▶ {mapping.value}"
+        if mapping.action == "url":
+            return f"🌐 {mapping.value}"
+        return self.vk_to_string(mapping.target_keys)
 
     @staticmethod
     def normalize_app(app: str) -> str:
@@ -830,7 +973,7 @@ class KeyRemapper:
                     continue
                 if rule_app == app and combo_signature(rule_keys) == signature:
                     return (f"{self.vk_to_string(rule_keys)}{scope} is already remapped to "
-                            f"{self.vk_to_string(mapping.target_keys)}")
+                            f"{self.target_text(mapping)}")
 
             for (rule_keys, rule_app), _ in self.blocked_keys.items():
                 if (rule_keys, rule_app) == ignore:
@@ -841,25 +984,45 @@ class KeyRemapper:
         return None
 
     def add_mapping(self, source: str, target: str, description: str = "",
-                    hold: str = "", app: str = "") -> bool:
+                    hold: str = "", app: str = "",
+                    action: str = "keys", value: str = "") -> bool:
         """
         Add a key mapping.
 
         Args:
-            source: Source key(s) string (e.g., 'capslock', 'ctrl+a')
-            target: Target key(s) string (e.g., 'escape', 'ctrl+c')
+            source: Source key(s) string (e.g., 'capslock', 'ctrl+a', 'f1')
+            target: Target key(s) string (e.g., 'escape', 'ctrl+c') - only used
+                when ``action`` is "keys"
             description: Optional description
             hold: Optional second role - what the key does when held down
             app: Optional executable this mapping is limited to
+            action: "keys", "launch" (start a program/file) or "url"
+            value: The program, file, command or URL, when action is not "keys"
 
         Returns:
             True if mapping was added successfully
         """
+        if action not in MAPPING_ACTIONS:
+            logger.warning("Unknown mapping action: %s", action)
+            return False
+
         try:
             source_keys = self.parse_key_string(source)
-            target_keys = self.parse_key_string(target)
             hold_keys = self.parse_key_string(hold) if hold.strip() else ()
             app = self.normalize_app(app)
+
+            if action == "keys":
+                target_keys = self.parse_key_string(target)
+                value = ""
+            else:
+                target_keys = ()
+                value = value.strip()
+                if not value:
+                    logger.warning("A %s mapping needs a program or URL", action)
+                    return False
+                if hold_keys:
+                    logger.warning("Hold roles only work with the 'keys' action")
+                    return False
 
             if hold_keys and len(source_keys) > 1:
                 logger.warning("Hold actions only work on single keys, not combinations")
@@ -875,16 +1038,18 @@ class KeyRemapper:
                 source_keys=source_keys,
                 target_keys=target_keys,
                 enabled=True,
-                description=description or f"{source} -> {target}",
+                description=description or f"{source} -> {value or target}",
                 hold_keys=hold_keys,
                 app=app,
+                action=action,
+                value=value,
             )
 
             with self._lock:
                 self.mappings[(source_keys, app)] = mapping
                 self._rebuild_index()
 
-            logger.info("Added mapping: %s -> %s%s%s", source, target,
+            logger.info("Added mapping: %s -> %s%s%s", source, value or target,
                         f" (hold: {hold})" if hold_keys else "",
                         f" [{app}]" if app else "")
             return True
@@ -1203,10 +1368,24 @@ class KeyRemapper:
                 self._send_key_combination(target, key_up=True)
         elif copilot.mode in ("launch", "url"):
             self._release_physical_modifiers()
-            self._ensure_action_worker()
-            self._action_queue.put((copilot.mode, copilot.value))
+            self._queue_action(copilot.mode, copilot.value)
 
         return ()
+
+    def _queue_action(self, action: str, value: str):
+        """
+        Hand a slow action to the worker thread.
+
+        Launching a program takes far longer than Windows allows a low-level
+        hook to run, so nothing of the sort happens on the hook thread.
+        """
+        self._ensure_action_worker()
+        self._action_queue.put((action, value))
+
+    def run_action(self, action: str, value: str):
+        """Run a launch/url action right now (used by the Test buttons)."""
+        if action in ("launch", "url") and value.strip():
+            self._queue_action(action, value)
 
     def _ensure_action_worker(self):
         if self._action_thread and self._action_thread.is_alive():
@@ -1226,34 +1405,42 @@ class KeyRemapper:
                     if not url.startswith(("http://", "https://", "ms-", "file:")):
                         url = "https://" + url
                     webbrowser.open(url)
-                    logger.info("Copilot key opened URL: %s", url)
+                    logger.info("Opened URL: %s", url)
                 elif mode == "launch":
                     self._launch(value)
             except Exception:
-                logger.exception("Copilot action failed: %s %r", mode, value)
+                logger.exception("Action failed: %s %r", mode, value)
 
-    @staticmethod
-    def _launch(command: str):
-        """Start a program, document or folder."""
+    # "ms-settings:", "shell:AppsFolder\\...", "mailto:" - anything the shell
+    # can open by protocol. Two or more characters before the colon, so a
+    # drive letter ("C:\\...") can never be mistaken for a scheme.
+    _URI_SCHEME = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.\-]+:')
+
+    @classmethod
+    def _launch(cls, command: str):
+        """Start a program, document, folder or packaged app."""
         target = command.strip().strip('"')
         if os.path.exists(target):
             os.startfile(target)  # type: ignore[attr-defined]
+        elif cls._URI_SCHEME.match(target):
+            # Packaged apps have no .exe to run - the shell resolves these
+            os.startfile(target)  # type: ignore[attr-defined]
         else:
-            # Allows "notepad", "shell:AppsFolder\\..." and commands with arguments
+            # Allows "notepad", "calc.exe" and commands with arguments
             subprocess.Popen(command, shell=True)
-        logger.info("Copilot key launched: %s", command)
+        logger.info("Launched: %s", command)
 
     # ------------------------------------------------------------------
     # Chord capture ("what does my Copilot key actually send?")
     # ------------------------------------------------------------------
 
-    def start_capture(self, callback: Callable[[Optional[Tuple[Tuple[str, ...], int]]], None]) -> bool:
+    def start_capture(self, callback: Callable[[Optional["CapturedChord"]], None]) -> bool:
         """
         Swallow all keyboard input until one chord is pressed, then report it.
 
-        The callback receives ``(modifier_families, vk_code)`` or ``None`` if the
-        user pressed Escape to cancel. It runs on the hook thread, so GUI code
-        must marshal back to its own thread.
+        The callback receives a :class:`CapturedChord` or ``None`` if the user
+        pressed Escape to cancel. It runs on the hook thread, so GUI code must
+        marshal back to its own thread.
         """
         if self._capture_callback is not None:
             return False
@@ -1291,17 +1478,22 @@ class KeyRemapper:
             except Exception:
                 logger.exception("Capture callback failed")
 
-    def _handle_capture(self, vk_code: int, is_keydown: bool, family: Optional[str]) -> int:
+    def _handle_capture(self, vk_code: int, is_keydown: bool, family: Optional[str],
+                        scan_code: int = 0) -> int:
         if is_keydown:
             if vk_code == int(VirtualKey.VK_ESCAPE) and not self.state.active_modifiers:
                 logger.info("Chord capture cancelled")
                 self._finish_capture(None)
             elif family is None:
-                families = tuple(sorted(
+                families = tuple(sort_modifiers(
                     MODIFIER_FAMILY[m] for m in self.state.active_modifiers
                 ))
-                logger.info("Chord captured: %s + 0x%02X", families, vk_code)
-                self._finish_capture((families, vk_code))
+                chord = CapturedChord(
+                    modifiers=families, vk=vk_code, scan_code=scan_code
+                )
+                logger.info("Chord captured: %s (%s)",
+                            chord.key_string(), chord.hardware_text())
+                self._finish_capture(chord)
         return 1  # swallow everything while capturing
 
     # ------------------------------------------------------------------
@@ -1351,7 +1543,8 @@ class KeyRemapper:
     # Hook
     # ------------------------------------------------------------------
 
-    def _handle_key_event(self, vk_code: int, is_keydown: bool, is_keyup: bool) -> bool:
+    def _handle_key_event(self, vk_code: int, is_keydown: bool, is_keyup: bool,
+                          scan_code: int = 0) -> bool:
         """
         Shared keyboard/mouse rule engine.
 
@@ -1370,7 +1563,7 @@ class KeyRemapper:
                 self.state.active_modifiers.discard(vk_code)
 
         if self._capture_callback is not None:
-            self._handle_capture(vk_code, is_keydown, family)
+            self._handle_capture(vk_code, is_keydown, family, scan_code)
             return True
 
         if self._capture_drain:
@@ -1429,6 +1622,17 @@ class KeyRemapper:
 
         # 3. Remapped keys
         if mapping is not None and mapping.enabled:
+            if mapping.action in ("launch", "url"):
+                self.state.suppressed_keys[vk_code] = None
+                # Same courtesy as the Copilot key: don't let a held Windows
+                # key pop the Start menu, and don't leak held modifiers into
+                # whatever we are about to open.
+                if 'win' in families:
+                    self._send_dummy_key()
+                self._release_physical_modifiers()
+                self._queue_action(mapping.action, mapping.value)
+                return True
+
             if mapping.hold_keys:
                 return bool(self._start_dual_role(vk_code, mapping))
             self.state.suppressed_keys[vk_code] = mapping.target_keys
@@ -1453,6 +1657,7 @@ class KeyRemapper:
                 kb.vkCode,
                 wParam in (WM_KEYDOWN, WM_SYSKEYDOWN),
                 wParam in (WM_KEYUP, WM_SYSKEYUP),
+                kb.scanCode,
             ):
                 return 1
 
@@ -1615,11 +1820,13 @@ class KeyRemapper:
             copilot = self.copilot
             settings = self.settings
             config = {
-                "version": 4,
+                "version": 5,
                 "mappings": [
                     {
                         "source": self.vk_to_string(m.source_keys),
                         "target": self.vk_to_string(m.target_keys),
+                        "action": m.action,
+                        "value": m.value,
                         "hold": self.vk_to_string(m.hold_keys) if m.hold_keys else "",
                         "app": m.app,
                         "enabled": m.enabled,
@@ -1693,10 +1900,15 @@ class KeyRemapper:
                 description = mapping_data.get("description", "")
                 hold = mapping_data.get("hold", "")
                 app = mapping_data.get("app", "")
+                # Configs from before v5 have no action - they all send keys
+                action = mapping_data.get("action", "keys")
+                value = mapping_data.get("value", "")
 
-                if source and target:
-                    self.add_mapping(source, target, description, hold=hold, app=app)
+                if not source or (action == "keys" and not target):
+                    continue
 
+                if self.add_mapping(source, target, description, hold=hold, app=app,
+                                    action=action, value=value):
                     # Handle enabled state
                     if not mapping_data.get("enabled", True):
                         self.toggle_mapping(source, app)
@@ -1735,12 +1947,124 @@ class KeyRemapper:
                 result.append({
                     "source": self.vk_to_string(mapping.source_keys),
                     "target": self.vk_to_string(mapping.target_keys),
+                    "action": mapping.action,
+                    "value": mapping.value,
+                    "display_target": self.target_text(mapping),
                     "hold": self.vk_to_string(mapping.hold_keys) if mapping.hold_keys else "",
                     "app": mapping.app,
                     "enabled": mapping.enabled,
                     "description": mapping.description
                 })
         return result
+
+
+# A private handle so GetLastError is reliable. The module-wide `kernel32`
+# is not loaded with use_last_error, and ctypes only preserves the error code
+# for libraries that are.
+_kernel32_err = ctypes.WinDLL('kernel32', use_last_error=True)
+_kernel32_err.CreateMutexW.restype = wintypes.HANDLE
+_kernel32_err.CreateMutexW.argtypes = [wintypes.LPCVOID, wintypes.BOOL, wintypes.LPCWSTR]
+_kernel32_err.CreateEventW.restype = wintypes.HANDLE
+_kernel32_err.CreateEventW.argtypes = [wintypes.LPCVOID, wintypes.BOOL, wintypes.BOOL,
+                                       wintypes.LPCWSTR]
+_kernel32_err.OpenEventW.restype = wintypes.HANDLE
+_kernel32_err.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+_kernel32_err.SetEvent.argtypes = [wintypes.HANDLE]
+_kernel32_err.WaitForSingleObject.restype = wintypes.DWORD
+_kernel32_err.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+_kernel32_err.CloseHandle.argtypes = [wintypes.HANDLE]
+
+ERROR_ALREADY_EXISTS = 183
+EVENT_MODIFY_STATE = 0x0002
+WAIT_OBJECT_0 = 0
+INFINITE = 0xFFFFFFFF
+
+
+class SingleInstance:
+    """
+    Keeps one copy of the app running at a time.
+
+    The first instance owns a named mutex and waits on a named event. A second
+    one finds the mutex taken, signals the event and exits - so launching the
+    app again while it sits hidden in the tray brings that window back instead
+    of starting a second keyboard hook.
+
+    Both names are scoped to the logon session, which needs no elevation:
+    two different users can each run their own copy.
+    """
+
+    def __init__(self, scope: str = APP_NAME):
+        # `scope` names the pair of objects. Anything other than the default is
+        # a private namespace - which is how the tests avoid colliding with a
+        # copy of the app the developer happens to have running.
+        self.mutex_name = f"Local\\{scope}_instance"
+        self.event_name = f"Local\\{scope}_show"
+        self._mutex = None
+        self._event = None
+        self._thread = None
+        self.is_first = True
+
+    def acquire(self) -> bool:
+        """True when we are the only copy. False means one is already running."""
+        try:
+            self._mutex = _kernel32_err.CreateMutexW(None, False, self.mutex_name)
+            already = ctypes.get_last_error() == ERROR_ALREADY_EXISTS
+        except OSError:
+            logger.debug("Could not create the instance mutex", exc_info=True)
+            return True
+
+        # A mutex we could not create at all must never stop the app starting
+        self.is_first = True if not self._mutex else not already
+        if not self.is_first:
+            # CreateMutexW hands back a handle even when the object already
+            # exists. Drop it now so this copy does not keep the mutex alive
+            # past the moment it gives up.
+            _kernel32_err.CloseHandle(self._mutex)
+            self._mutex = None
+            logger.info("Another instance is already running")
+        return self.is_first
+
+    def signal_existing(self) -> bool:
+        """Ask the copy that is already running to show its window."""
+        handle = _kernel32_err.OpenEventW(EVENT_MODIFY_STATE, False, self.event_name)
+        if not handle:
+            logger.info("The running instance did not answer")
+            return False
+        try:
+            return bool(_kernel32_err.SetEvent(handle))
+        finally:
+            _kernel32_err.CloseHandle(handle)
+
+    def listen(self, callback: Callable[[], None]):
+        """Call *callback* (on a worker thread) whenever another copy starts."""
+        # Auto-reset, initially unsignalled
+        self._event = _kernel32_err.CreateEventW(None, False, False, self.event_name)
+        if not self._event:
+            logger.debug("Could not create the instance event")
+            return
+
+        def wait():
+            while True:
+                if _kernel32_err.WaitForSingleObject(self._event, INFINITE) != WAIT_OBJECT_0:
+                    return
+                try:
+                    callback()
+                except Exception:
+                    logger.exception("Instance callback failed")
+
+        self._thread = threading.Thread(
+            target=wait, name="KeyRemapperInstance", daemon=True
+        )
+        self._thread.start()
+
+    def release(self):
+        for handle in (self._event, self._mutex):
+            if handle:
+                try:
+                    _kernel32_err.CloseHandle(handle)
+                except OSError:
+                    pass
+        self._event = self._mutex = None
 
 
 STARTUP_REGISTRY_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -1802,6 +2126,37 @@ def check_admin() -> bool:
         return False
 
 
+def _wrap_notice(text: str, width: int = 68) -> List[str]:
+    """Wrap a notice for the text-mode menus."""
+    words, lines, current = text.split(), [], ""
+    for word in words:
+        if current and len(current) + 1 + len(word) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        lines.append(current)
+    return lines
+
+
+def capture_chord(remapper: "KeyRemapper", timeout: float = 15.0) -> Optional[CapturedChord]:
+    """Block until one chord is captured. Returns None on cancel or timeout."""
+    result: List[Optional[CapturedChord]] = []
+    done = threading.Event()
+
+    def on_chord(chord):
+        result.append(chord)
+        done.set()
+
+    if not remapper.start_capture(on_chord):
+        return None
+    if not done.wait(timeout=timeout):
+        remapper.cancel_capture()
+        return None
+    return result[0] if result else None
+
+
 def print_available_keys():
     """Print all available key names"""
     print("\n=== Available Key Names ===\n")
@@ -1810,11 +2165,14 @@ def print_available_keys():
         "Letters": [k for k in KEY_NAME_TO_VK.keys() if len(k) == 1 and k.isalpha()],
         "Numbers": [k for k in KEY_NAME_TO_VK.keys() if len(k) == 1 and k.isdigit()],
         "Function Keys": [k for k in KEY_NAME_TO_VK.keys() if k.startswith('f') and k[1:].isdigit()],
-        "Modifiers": ['shift', 'lshift', 'rshift', 'ctrl', 'lctrl', 'rctrl', 'alt', 'lalt', 'ralt', 'win', 'lwin', 'rwin'],
+        "Modifiers": ['shift', 'lshift', 'rshift', 'ctrl', 'lctrl', 'rctrl',
+                      'alt', 'lalt', 'ralt', 'win', 'lwin', 'rwin'],
         "Navigation": ['up', 'down', 'left', 'right', 'home', 'end', 'pageup', 'pgup', 'pagedown', 'pgdn'],
         "Special": ['escape', 'esc', 'tab', 'capslock', 'caps', 'space', 'enter', 'return', 'backspace', 'delete', 'insert', 'apps'],
         "Numpad": [k for k in KEY_NAME_TO_VK.keys() if k.startswith('num')],
-        "Media": ['playpause', 'nexttrack', 'prevtrack', 'mediastop', 'mute', 'volumeup', 'volumedown', 'calculator', 'mail'],
+        "Media": ['playpause', 'nexttrack', 'prevtrack', 'mediastop', 'mute',
+                  'volumeup', 'volumedown', 'calculator', 'mail', 'mediaselect',
+                  'launchapp1', 'launchapp2', 'sleep'],
         "Browser": [k for k in KEY_NAME_TO_VK.keys() if k.startswith('browser')],
         "Mouse (source only)": ['mouse3', 'middleclick', 'mouse4', 'mouse5'],
     }
@@ -1825,6 +2183,14 @@ def print_available_keys():
             print(f"{category}:")
             print(f"  {', '.join(sorted(available))}")
             print()
+
+    print("Anything else your keyboard sends:")
+    print("  vk0x5D / vk93 - a raw virtual key code, as 🎯 Detect reports it")
+    print()
+    print("A note on the Fn key:")
+    for line in _wrap_notice(FN_KEY_NOTICE, 68):
+        print(f"  {line}")
+    print()
 
 
 def configure_copilot_cli(remapper: KeyRemapper):
@@ -1850,29 +2216,17 @@ def configure_copilot_cli(remapper: KeyRemapper):
 
     if choice == '1':
         print("\nPress your Copilot key now (Escape cancels)...")
-        result: List = []
-        done = threading.Event()
-
-        def on_chord(chord):
-            result.append(chord)
-            done.set()
-
-        if not remapper.start_capture(on_chord):
-            print("✗ Could not start key capture.")
-        elif not done.wait(timeout=15.0):
-            remapper.cancel_capture()
-            print("✗ Timed out.")
-        elif result and result[0]:
-            modifiers, vk = result[0]
+        chord = capture_chord(remapper)
+        if chord:
             copilot = CopilotConfig(
-                enabled=copilot.enabled, modifiers=modifiers, key=vk,
+                enabled=copilot.enabled, modifiers=chord.modifiers, key=chord.vk,
                 mode=copilot.mode, value=copilot.value
             )
             remapper.set_copilot(copilot)
             remapper.save_config()
-            print(f"\n✓ Detected: {copilot.chord_text()}")
+            print(f"\n✓ Detected: {copilot.chord_text()}  ({chord.hardware_text()})")
         else:
-            print("Cancelled.")
+            print("Cancelled or timed out.")
 
     elif choice in ('2', '3', '4', '5', '6'):
         mode = {'2': 'disable', '3': 'keys', '4': 'launch',
@@ -1964,10 +2318,30 @@ def interactive_menu(remapper: KeyRemapper):
                 source = input("Source key(s): ").strip()
                 if not source:
                     continue
-                target = input("Target key(s): ").strip()
-                if not target:
-                    continue
-                hold = input("When held instead (optional, single keys only): ").strip()
+
+                print("\nWhat should it do?")
+                print("  1. Send other key(s)   2. Launch a program or app   3. Open a website")
+                action = {'2': 'launch', '3': 'url'}.get(input("Choice [1]: ").strip(), 'keys')
+
+                target = value = hold = ""
+                if action == 'keys':
+                    target = input("Target key(s): ").strip()
+                    if not target:
+                        continue
+                    hold = input("When held instead (optional, single keys only): ").strip()
+                elif action == 'launch':
+                    print("\nCommon apps: " + ", ".join(name for name, _ in COMMON_APPS))
+                    value = input("Program, file or app (name or full path): ").strip()
+                    match = next((cmd for name, cmd in COMMON_APPS
+                                  if name.lower() == value.lower()), None)
+                    value = match or value
+                    if not value:
+                        continue
+                else:
+                    value = input("URL to open: ").strip()
+                    if not value:
+                        continue
+
                 app = input("Only in this app (optional, e.g. game.exe): ").strip()
                 desc = input("Description (optional): ").strip()
 
@@ -1978,12 +2352,14 @@ def interactive_menu(remapper: KeyRemapper):
                         input("\nCancelled. Press Enter to continue...")
                         continue
 
-                if remapper.add_mapping(source, target, desc, hold=hold, app=app):
+                if remapper.add_mapping(source, target, desc, hold=hold, app=app,
+                                        action=action, value=value):
                     print("\n✓ Mapping added successfully!")
                     remapper.save_config()
                 else:
                     print("\n✗ Failed to add mapping. Check the key names.")
-                    print("  (hold actions only work on single keys)")
+                    print("  (hold actions only work on single keys, and only")
+                    print("   when the mapping sends keys)")
                 input("\nPress Enter to continue...")
                 
             elif choice == '2':
@@ -1995,7 +2371,8 @@ def interactive_menu(remapper: KeyRemapper):
                     for i, m in enumerate(mappings, 1):
                         status = "✓" if m['enabled'] else "✗"
                         scope = f" [{m['app']}]" if m['app'] else ""
-                        print(f"  {i}. [{status}] {m['source']} -> {m['target']}{scope}")
+                        print(f"  {i}. [{status}] {m['source']} -> "
+                              f"{m['display_target']}{scope}")
 
                     source = input("\nEnter source key to remove (or 'cancel'): ").strip()
                     if source.lower() != 'cancel':
@@ -2023,7 +2400,7 @@ def interactive_menu(remapper: KeyRemapper):
                         if m['app']:
                             extras.append(f"only in {m['app']}")
                         suffix = f" ({', '.join(extras)})" if extras else ""
-                        print(f"  {m['source']} -> {m['target']}{suffix} [{status}]")
+                        print(f"  {m['source']} -> {m['display_target']}{suffix} [{status}]")
                         if m['description']:
                             print(f"    Description: {m['description']}")
                 input("\nPress Enter to continue...")

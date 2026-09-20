@@ -1,6 +1,18 @@
 # Windows Key Remapper
 
-A robust, gaming-compatible key remapping tool for Windows 11 (also works on Windows 10).
+A completely free, robust keyboard key remapping tool for Windows 11 (also works on Windows 10).
+
+Easily customize and remap keys
+<img width="562" height="493" alt="image" src="https://github.com/user-attachments/assets/2f326245-c250-49d1-8a04-a939c8174ec6" />
+
+Block keys to prevent unintentional keypress
+<img width="564" height="497" alt="image" src="https://github.com/user-attachments/assets/f243ee04-1cc7-428e-b07f-d6e8ffcf7355" />
+
+Complete Co-Pilot Key Remapping & Customization (Or disable forever)
+<img width="575" height="582" alt="image" src="https://github.com/user-attachments/assets/a26c7f3c-6eb3-433c-bc15-4edad4f805d8" />
+
+Option to auto-start at launch for uninterruped remapping and key blocking.
+<img width="581" height="599" alt="image" src="https://github.com/user-attachments/assets/34bb324d-f407-4ece-9f4e-0d6b9ed7bd9c" />
 
 **Version 2.4** | Built by Li Fan, 2026
 

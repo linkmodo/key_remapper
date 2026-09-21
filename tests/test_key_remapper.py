@@ -41,6 +41,7 @@ class FakeRemapper(kr.KeyRemapper):
         super().__init__()
         self.sent = []
         self.actions = []
+        self.typed = []
         self.clock = 1000.0
 
     def _send_key(self, vk_code, key_up=False):
@@ -48,6 +49,9 @@ class FakeRemapper(kr.KeyRemapper):
 
     def _queue_action(self, action, value):
         self.actions.append((action, value))
+
+    def _send_text(self, text):
+        self.typed.append(text)
 
     def now(self):
         return self.clock
@@ -696,6 +700,191 @@ class FnKeyNotSupportedTests(unittest.TestCase):
         self.assertEqual(sources, ['F13'])
 
 
+class TypeTextTests(unittest.TestCase):
+    """
+    "text" rules type characters rather than keys, so the keyboard layout
+    cannot change what comes out - the reason the action exists.
+    """
+
+    RCTRL = int(kr.VirtualKey.VK_RCONTROL)
+
+    def setUp(self):
+        self.remapper = FakeRemapper()
+
+    def test_key_types_its_text_and_is_swallowed(self):
+        self.assertTrue(self.remapper.add_mapping('f13', '', action='text', value='.'))
+        self.assertTrue(self.remapper.down(F13))
+        self.assertEqual(self.remapper.typed, ['.'])
+        self.assertEqual(self.remapper.sent, [], "no virtual key is sent at all")
+        self.assertTrue(self.remapper.up(F13), "the release is swallowed too")
+
+    def test_the_period_and_comma_setup_from_the_bug_report(self):
+        """rctrl types '.', shift+rctrl types ',' - whatever the layout."""
+        self.remapper.add_mapping('rctrl', '', action='text', value='.')
+        self.remapper.add_mapping('shift+rctrl', '', action='text', value=',')
+
+        self.remapper.down(self.RCTRL)
+        self.remapper.up(self.RCTRL)
+        self.remapper.down(LSHIFT)
+        self.remapper.down(self.RCTRL)
+
+        self.assertEqual(self.remapper.typed, ['.', ','])
+
+    def test_holding_the_key_repeats_the_text(self):
+        self.remapper.add_mapping('f13', '', action='text', value='.')
+        for _ in range(3):
+            self.remapper.down(F13)   # auto-repeat delivers repeated key-downs
+        self.assertEqual(self.remapper.typed, ['.', '.', '.'])
+
+    def test_whitespace_is_kept(self):
+        self.remapper.add_mapping('f13', '', action='text', value=', ')
+        self.remapper.down(F13)
+        self.assertEqual(self.remapper.typed, [', '])
+
+    def test_a_lone_space_is_valid_text(self):
+        self.assertTrue(self.remapper.add_mapping('f13', '', action='text', value=' '))
+
+    def test_empty_text_is_rejected(self):
+        self.assertFalse(self.remapper.add_mapping('f13', '', action='text', value=''))
+
+    def test_text_expansion(self):
+        self.remapper.add_mapping('ctrl+alt+m', '', action='text', value='me@example.com')
+        self.remapper.down(LCTRL)
+        self.remapper.down(int(kr.VirtualKey.VK_LMENU))
+        self.remapper.down(0x4D)
+        self.assertEqual(self.remapper.typed, ['me@example.com'])
+
+    def test_hold_roles_do_not_mix_with_text(self):
+        self.assertFalse(self.remapper.add_mapping(
+            'capslock', '', hold='ctrl', action='text', value='.'))
+
+    # --- the Settings switch ----------------------------------------------
+
+    def test_switching_typing_off_lets_the_key_through(self):
+        self.remapper.add_mapping('f13', '', action='text', value='.')
+        self.remapper.apply_settings(kr.Settings(type_text_enabled=False))
+
+        self.assertFalse(self.remapper.down(F13), "the physical key does its normal job")
+        self.assertEqual(self.remapper.typed, [])
+        self.assertEqual(len(self.remapper.list_mappings()), 1, "the rule is kept, not deleted")
+
+    def test_switching_typing_back_on_restores_it(self):
+        self.remapper.add_mapping('f13', '', action='text', value='.')
+        self.remapper.apply_settings(kr.Settings(type_text_enabled=False))
+        self.remapper.down(F13)
+        self.remapper.up(F13)
+
+        self.remapper.apply_settings(kr.Settings(type_text_enabled=True))
+        self.assertTrue(self.remapper.down(F13))
+        self.assertEqual(self.remapper.typed, ['.'])
+
+    def test_the_switch_leaves_other_rules_alone(self):
+        self.remapper.add_mapping('f13', '', action='text', value='.')
+        self.remapper.add_mapping('f14', 'a')
+        self.remapper.apply_settings(kr.Settings(type_text_enabled=False))
+
+        self.assertTrue(self.remapper.down(int(kr.VirtualKey.VK_F14)))
+        self.assertEqual(self.remapper.sent, [(KEY_A, 'down')])
+
+    def test_the_switch_does_not_disable_blocks(self):
+        self.remapper.block_key('f13')
+        self.remapper.apply_settings(kr.Settings(type_text_enabled=False))
+        self.assertTrue(self.remapper.down(F13))
+
+    def test_switch_defaults_on_and_survives_a_save(self):
+        self.assertTrue(kr.Settings().type_text_enabled)
+        path = Path(tempfile.mkdtemp()) / "text.json"
+        self.remapper.apply_settings(kr.Settings(type_text_enabled=False))
+        self.remapper.save_config(path)
+
+        loaded = FakeRemapper()
+        loaded.load_config(path)
+        self.assertFalse(loaded.settings.type_text_enabled)
+
+    def test_older_configs_have_typing_on(self):
+        self.assertTrue(kr.settings_from_dict({"tap_timeout_ms": 200}).type_text_enabled)
+
+    # --- persistence and display -----------------------------------------
+
+    def test_text_rule_round_trips_exactly(self):
+        path = Path(tempfile.mkdtemp()) / "rules.json"
+        self.remapper.add_mapping('f13', '', action='text', value=', ')
+        self.remapper.add_mapping('f14', '', action='text', value='ю — €')
+        self.remapper.save_config(path)
+
+        loaded = FakeRemapper()
+        loaded.load_config(path)
+        self.assertEqual(loaded.list_mappings(), self.remapper.list_mappings())
+        values = [m['value'] for m in loaded.list_mappings()]
+        self.assertEqual(values, [', ', 'ю — €'])
+
+    def test_listed_target_shows_the_text(self):
+        self.remapper.add_mapping('f13', '', action='text', value='.')
+        self.assertEqual(self.remapper.list_mappings()[0]['display_target'], '✎ “.”')
+
+    def test_test_button_types_immediately(self):
+        self.remapper.run_action('text', 'hi')
+        self.assertEqual(self.remapper.typed, ['hi'])
+
+
+class UnicodeInjectionTests(unittest.TestCase):
+    """The real _send_text, with SendInput captured instead of called."""
+
+    def setUp(self):
+        self.calls = []
+        self.original = kr.user32.SendInput
+
+        def capture(count, events, size):
+            self.calls.append([
+                (events[i].union.ki.wVk, events[i].union.ki.wScan,
+                 events[i].union.ki.dwFlags, events[i].union.ki.dwExtraInfo)
+                for i in range(count)
+            ])
+            return count
+
+        kr.user32.SendInput = capture
+        self.addCleanup(self._restore)
+        self.remapper = kr.KeyRemapper()
+
+    def _restore(self):
+        kr.user32.SendInput = self.original
+
+    def test_each_character_is_a_unicode_down_up_pair(self):
+        self.remapper._send_text('.,')
+        marker = self.remapper._injection_marker
+        self.assertEqual(self.calls, [[
+            (0, ord('.'), kr.KEYEVENTF_UNICODE, marker),
+            (0, ord('.'), kr.KEYEVENTF_UNICODE | kr.KEYEVENTF_KEYUP, marker),
+            (0, ord(','), kr.KEYEVENTF_UNICODE, marker),
+            (0, ord(','), kr.KEYEVENTF_UNICODE | kr.KEYEVENTF_KEYUP, marker),
+        ]])
+
+    def test_no_virtual_key_is_involved(self):
+        """wVk = 0 is what makes the result immune to the keyboard layout."""
+        self.remapper._send_text('ю.')
+        self.assertTrue(all(event[0] == 0 for event in self.calls[0]))
+
+    def test_whole_text_goes_in_one_call(self):
+        """One SendInput call, so other input cannot interleave with it."""
+        self.remapper._send_text('hello world')
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(self.calls[0]), 22)
+
+    def test_emoji_is_sent_as_a_surrogate_pair(self):
+        self.remapper._send_text('😀')
+        units = [event[1] for event in self.calls[0] if not event[2] & kr.KEYEVENTF_KEYUP]
+        self.assertEqual(units, [0xD83D, 0xDE00])
+
+    def test_injected_text_is_tagged_as_ours(self):
+        """The hook must skip its own packets or a rule could trigger itself."""
+        self.remapper._send_text('.')
+        self.assertTrue(all(e[3] == self.remapper._injection_marker for e in self.calls[0]))
+
+    def test_empty_text_sends_nothing(self):
+        self.remapper._send_text('')
+        self.assertEqual(self.calls, [])
+
+
 class MappingActionTests(unittest.TestCase):
     """A key can open an app or a website instead of sending keys."""
 
@@ -864,6 +1053,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(raw['settings'], {
             'toggle_hotkey': 'ctrl+alt+f12', 'tap_timeout_ms': 175,
             'run_at_startup': True, 'start_minimized': True, 'start_on_launch': True,
+            'type_text_enabled': True,
         })
 
         # And it all comes back

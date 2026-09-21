@@ -42,6 +42,18 @@ except ImportError:
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+# Secondary (gray) buttons. The hover used to be a lighter gray, which barely
+# registered - a clear accent makes it obvious what the pointer is on.
+GRAY_BUTTON = "#7f8c8d"
+GRAY_BUTTON_HOVER = "#2e86c1"
+
+# Start / Stop. Only one of the pair is clickable at a time; the other shows
+# the current state, so it gets a darker fill with *legible* text rather than
+# CustomTkinter's default disabled gray, which vanishes on green or red.
+START_COLOR, START_HOVER, START_IDLE = "#27ae60", "#2ecc71", "#1e7a45"
+STOP_COLOR, STOP_HOVER, STOP_IDLE = "#c0392b", "#e74c3c", "#7d2a22"
+IDLE_TEXT = "#e8f6ef"
+
 
 def _window_scaling(widget) -> float:
     """
@@ -391,9 +403,30 @@ class AddMappingDialog(ctk.CTkToplevel):
 
     ACTION_LABELS = {
         "Send other key(s)": "keys",
+        "Type text (ignores keyboard layout)": "text",
         "Launch a program or app": "launch",
         "Open a website": "url",
     }
+
+    # Characters people most often want pinned to a key regardless of layout.
+    # Punctuation first: it is what moves around between layouts.
+    COMMON_CHARACTERS = [
+        ("Period  .", "."),
+        ("Comma  ,", ","),
+        ("Semicolon  ;", ";"),
+        ("Colon  :", ":"),
+        ("Question mark  ?", "?"),
+        ("Exclamation mark  !", "!"),
+        ("Apostrophe  '", "'"),
+        ("Quotation mark  \"", "\""),
+        ("Slash  /", "/"),
+        ("At sign  @", "@"),
+        ("Hash  #", "#"),
+        ("Em dash  —", "—"),
+        ("Ellipsis  …", "…"),
+        ("Euro  €", "€"),
+        ("Degree  °", "°"),
+    ]
 
     def __init__(self, parent, remapper: KeyRemapper, existing: dict = None):
         super().__init__(parent)
@@ -452,7 +485,10 @@ class AddMappingDialog(ctk.CTkToplevel):
         self.keys_frame = ctk.CTkFrame(body, fg_color="transparent")
         self.value_frame = ctk.CTkFrame(body, fg_color="transparent")
 
+        self.text_frame = ctk.CTkFrame(body, fg_color="transparent")
+
         self._build_keys_frame()
+        self._build_text_frame()
         self._build_value_frame()
 
         # App scope
@@ -513,6 +549,72 @@ class AddMappingDialog(ctk.CTkToplevel):
         self.hold_entry.pack(side="left", padx=(0, 5))
         ctk.CTkButton(hold_frame, text="🎯 Detect", command=self._detect_hold, width=70).pack(side="left")
 
+    def _build_text_frame(self):
+        """Literal characters, typed the same whatever the keyboard layout."""
+        frame = self.text_frame
+
+        ctk.CTkLabel(frame, text="Text to type:", font=ctk.CTkFont(size=13)).pack(pady=(12, 4))
+        self.text_entry = ctk.CTkEntry(
+            frame, width=365, placeholder_text="e.g.  .   or  ,   or  me@example.com"
+        )
+        self.text_entry.pack(pady=2)
+
+        ctk.CTkLabel(
+            frame, text="Or pick a character:", font=ctk.CTkFont(size=11), text_color="gray"
+        ).pack(pady=(8, 2))
+        self._characters = dict(self.COMMON_CHARACTERS)
+        self.char_preset_menu = ctk.CTkOptionMenu(
+            frame, values=list(self._characters), width=365,
+            command=self._on_char_preset_change,
+            fg_color="#3b5a70", button_color="#2c5d7c"
+        )
+        self.char_preset_menu.set("Choose…")
+        self.char_preset_menu.pack(pady=2)
+
+        # Somewhere safe to see the result: the Test button types into here
+        try_row = ctk.CTkFrame(frame, fg_color="transparent")
+        try_row.pack(pady=(10, 2))
+        self.try_entry = ctk.CTkEntry(try_row, width=285, placeholder_text="Test types here")
+        self.try_entry.pack(side="left", padx=(0, 5))
+        ctk.CTkButton(
+            try_row, text="▶ Test", command=self._test_text, width=75,
+            fg_color=GRAY_BUTTON, hover_color=GRAY_BUTTON_HOVER
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            frame,
+            text="Sent as characters, not keys, so switching keyboard layout does not "
+                 "change them. Shift doesn't change them either, so add a separate rule "
+                 "for the shifted character (e.g. rctrl → .  and  shift+rctrl → ,). "
+                 "Games that read raw keyboard input won't see typed text.",
+            font=ctk.CTkFont(size=10), text_color="gray", wraplength=400, justify="left"
+        ).pack(pady=(6, 2))
+
+        # Only shown while the master switch in Settings is off
+        self.text_off_warning = ctk.CTkLabel(
+            frame,
+            text="Typing text is switched off in Settings. This rule will be saved "
+                 "but won't do anything until you switch it back on.",
+            font=ctk.CTkFont(size=11), text_color="#f39c12", wraplength=400, justify="left"
+        )
+
+    def _on_char_preset_change(self, label: str):
+        char = self._characters.get(label)
+        if char:
+            self.text_entry.delete(0, 'end')
+            self.text_entry.insert(0, char)
+
+    def _test_text(self):
+        text = self.text_entry.get()
+        if not text:
+            messagebox.showinfo("Nothing to test", "Fill in the text to type first.")
+            return
+        # Characters go wherever the keyboard focus is, so put it in the try box
+        # and give Windows a moment to move it there before typing
+        self.try_entry.delete(0, 'end')
+        self.try_entry.focus_set()
+        self.after(150, lambda: self.remapper.run_action("text", text))
+
     def _build_value_frame(self):
         """A program to launch, or a website to open."""
         frame = self.value_frame
@@ -528,7 +630,7 @@ class AddMappingDialog(ctk.CTkToplevel):
         self.browse_btn.pack(side="left", padx=(0, 5))
         ctk.CTkButton(
             row, text="▶ Test", command=self._test_value, width=70,
-            fg_color="#7f8c8d", hover_color="#95a5a6"
+            fg_color=GRAY_BUTTON, hover_color=GRAY_BUTTON_HOVER
         ).pack(side="left")
 
         self.app_preset_label = ctk.CTkLabel(
@@ -561,10 +663,20 @@ class AddMappingDialog(ctk.CTkToplevel):
         action = self._current_action()
 
         self.keys_frame.pack_forget()
+        self.text_frame.pack_forget()
         self.value_frame.pack_forget()
 
         if action == "keys":
             self.keys_frame.pack(before=self.scope_label, fill="x")
+            self._refresh_body()
+            return
+
+        if action == "text":
+            self.text_frame.pack(before=self.scope_label, fill="x")
+            if self.remapper.settings.type_text_enabled:
+                self.text_off_warning.pack_forget()
+            else:
+                self.text_off_warning.pack(pady=(6, 2))
             self._refresh_body()
             return
 
@@ -643,7 +755,10 @@ class AddMappingDialog(ctk.CTkToplevel):
         self.source_entry.insert(0, existing.get('source', ''))
         self.target_entry.insert(0, existing.get('target', ''))
         self.hold_entry.insert(0, existing.get('hold', ''))
-        self.value_entry.insert(0, existing.get('value', ''))
+        if action == "text":
+            self.text_entry.insert(0, existing.get('value', ''))
+        else:
+            self.value_entry.insert(0, existing.get('value', ''))
         self.app_entry.insert(0, existing.get('app', ''))
 
         # Only carry over a description the user actually wrote - an
@@ -678,7 +793,13 @@ class AddMappingDialog(ctk.CTkToplevel):
         source = self.source_entry.get().strip()
         target = self.target_entry.get().strip() if action == "keys" else ""
         hold = self.hold_entry.get().strip() if action == "keys" else ""
-        value = self.value_entry.get().strip() if action != "keys" else ""
+        if action == "text":
+            # Deliberately not stripped: ", " and a lone space are real text
+            value = self.text_entry.get()
+        elif action != "keys":
+            value = self.value_entry.get().strip()
+        else:
+            value = ""
         app = self.app_entry.get().strip()
         desc = self.desc_entry.get().strip()
 
@@ -689,11 +810,10 @@ class AddMappingDialog(ctk.CTkToplevel):
             messagebox.showerror("Error", "Please enter a target key.")
             return
         if action != "keys" and not value:
-            messagebox.showerror(
-                "Error",
-                "Please choose a program to launch." if action == "launch"
-                else "Please enter a website address."
-            )
+            messagebox.showerror("Error", {
+                "text": "Please enter the text to type.",
+                "launch": "Please choose a program to launch.",
+            }.get(action, "Please enter a website address."))
             return
 
         ignore = None
@@ -894,8 +1014,9 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             text="▶ Start", 
             command=self._start_remapper,
             width=100,
-            fg_color="#27ae60",
-            hover_color="#2ecc71"
+            fg_color=START_COLOR,
+            hover_color=START_HOVER,
+            text_color_disabled=IDLE_TEXT
         )
         self.start_btn.pack(side="left", padx=5)
         
@@ -904,8 +1025,9 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             text="■ Stop", 
             command=self._stop_remapper,
             width=100,
-            fg_color="#c0392b",
-            hover_color="#e74c3c",
+            fg_color=STOP_IDLE,
+            hover_color=STOP_HOVER,
+            text_color_disabled=IDLE_TEXT,
             state="disabled"
         )
         self.stop_btn.pack(side="left", padx=5)
@@ -991,8 +1113,8 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             text="Edit Selected",
             command=self._edit_mapping,
             width=130,
-            fg_color="#7f8c8d",
-            hover_color="#95a5a6"
+            fg_color=GRAY_BUTTON,
+            hover_color=GRAY_BUTTON_HOVER
         ).pack(side="left", padx=5)
 
         ctk.CTkButton(
@@ -1000,8 +1122,8 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             text="Remove Selected",
             command=self._remove_mapping,
             width=130,
-            fg_color="#7f8c8d",
-            hover_color="#95a5a6"
+            fg_color=GRAY_BUTTON,
+            hover_color=GRAY_BUTTON_HOVER
         ).pack(side="left", padx=5)
 
         ctk.CTkButton(
@@ -1009,8 +1131,8 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             text="Toggle On/Off",
             command=self._toggle_mapping,
             width=130,
-            fg_color="#7f8c8d",
-            hover_color="#95a5a6"
+            fg_color=GRAY_BUTTON,
+            hover_color=GRAY_BUTTON_HOVER
         ).pack(side="left", padx=5)
 
         ctk.CTkLabel(
@@ -1068,8 +1190,8 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             text="Unblock Selected", 
             command=self._unblock_key,
             width=130,
-            fg_color="#7f8c8d",
-            hover_color="#95a5a6"
+            fg_color=GRAY_BUTTON,
+            hover_color=GRAY_BUTTON_HOVER
         ).pack(side="left", padx=5)
         
         ctk.CTkButton(
@@ -1077,8 +1199,8 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             text="Toggle On/Off", 
             command=self._toggle_blocked,
             width=130,
-            fg_color="#7f8c8d",
-            hover_color="#95a5a6"
+            fg_color=GRAY_BUTTON,
+            hover_color=GRAY_BUTTON_HOVER
         ).pack(side="left", padx=5)
         
         # Scrollable frame for blocked keys
@@ -1237,7 +1359,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
 
         ctk.CTkButton(
             action_frame, text="▶ Test action", command=self._test_copilot, width=120,
-            fg_color="#7f8c8d", hover_color="#95a5a6"
+            fg_color=GRAY_BUTTON, hover_color=GRAY_BUTTON_HOVER
         ).pack(side="left", padx=4)
 
         self.copilot_status_label = ctk.CTkLabel(
@@ -1469,7 +1591,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         ).pack(side="left", padx=(0, 5))
 
         ctk.CTkButton(
-            hotkey_frame, text="Clear", width=70, fg_color="#7f8c8d", hover_color="#95a5a6",
+            hotkey_frame, text="Clear", width=70, fg_color=GRAY_BUTTON, hover_color=GRAY_BUTTON_HOVER,
             command=lambda: self.hotkey_entry.delete(0, 'end')
         ).pack(side="left")
 
@@ -1517,6 +1639,24 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         ctk.CTkCheckBox(
             tab, text="Activate my mappings as soon as the app opens",
             variable=self.autostart_var
+        ).pack(anchor="w", padx=14, pady=(4, 14))
+
+        # --- Typing text ---
+        ctk.CTkLabel(
+            tab, text="Typing text", font=ctk.CTkFont(size=13, weight="bold")
+        ).pack(anchor="w", padx=10)
+        ctk.CTkLabel(
+            tab,
+            text="\u201cType text\u201d rules send characters instead of keys, so switching\n"
+                 "keyboard layout never changes what they type. Untick to pause every\n"
+                 "text rule at once \u2014 the keys go back to normal, and the rules are kept.",
+            font=ctk.CTkFont(size=11), text_color="gray", justify="left"
+        ).pack(anchor="w", padx=10, pady=(0, 4))
+
+        self.type_text_var = ctk.BooleanVar(value=settings.type_text_enabled)
+        ctk.CTkCheckBox(
+            tab, text="Type text as characters (layout-independent)",
+            variable=self.type_text_var
         ).pack(anchor="w", padx=14, pady=(4, 14))
 
         # --- Apply ---
@@ -1570,6 +1710,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             run_at_startup=bool(self.startup_var.get()),
             start_minimized=bool(self.minimized_var.get()),
             start_on_launch=bool(self.autostart_var.get()),
+            type_text_enabled=bool(self.type_text_var.get()),
         )
 
         if not self.remapper.apply_settings(settings):
@@ -1586,6 +1727,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             )
 
         self.remapper.save_config()
+        self._refresh_mappings()
         self.settings_status_label.configure(
             text="Saved. " + (f"Press {settings.toggle_hotkey} to pause or resume."
                               if settings.toggle_hotkey else "No pause hotkey set."),
@@ -1623,6 +1765,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         self.startup_var.set(False)
         self.minimized_var.set(defaults.start_minimized)
         self.autostart_var.set(defaults.start_on_launch)
+        self.type_text_var.set(defaults.type_text_enabled)
         self.settings_status_label.configure(text="Everything reset to defaults.", text_color="gray")
 
         self._refresh_lists()
@@ -1663,7 +1806,10 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             row.mapping_source = m['source']
 
             # Status indicator
-            status_color = "#27ae60" if m['enabled'] else "#7f8c8d"
+            # A text rule is also inert while typing is switched off in Settings
+            paused_by_switch = (m['action'] == "text"
+                                and not self.remapper.settings.type_text_enabled)
+            status_color = "#27ae60" if m['enabled'] and not paused_by_switch else "#7f8c8d"
             status = ctk.CTkLabel(row, text="●", width=30, text_color=status_color)
             status.pack(side="left", padx=5)
 
@@ -1673,9 +1819,11 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             # Arrow
             ctk.CTkLabel(row, text="→", width=20).pack(side="left")
 
-            # Target - the keys it sends, or the app/site it opens
+            # Target - the keys it sends, the text it types, or what it opens
             ctk.CTkLabel(
-                row, text=m['display_target'], width=110, anchor="w"
+                row, text=m['display_target'] + ("  (off)" if paused_by_switch else ""),
+                width=110, anchor="w",
+                text_color="#7f8c8d" if paused_by_switch else None
             ).pack(side="left", padx=5)
 
             # Hold role
@@ -1870,18 +2018,18 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         if running and self.remapper.paused:
             self.status_indicator.configure(text_color="#f39c12")
             self.status_label.configure(text="PAUSED")
-            self.start_btn.configure(state="disabled")
-            self.stop_btn.configure(state="normal")
+            self.start_btn.configure(state="disabled", fg_color=START_IDLE)
+            self.stop_btn.configure(state="normal", fg_color=STOP_COLOR)
         elif running:
             self.status_indicator.configure(text_color="#27ae60")
             self.status_label.configure(text="ACTIVE")
-            self.start_btn.configure(state="disabled")
-            self.stop_btn.configure(state="normal")
+            self.start_btn.configure(state="disabled", fg_color=START_IDLE)
+            self.stop_btn.configure(state="normal", fg_color=STOP_COLOR)
         else:
             self.status_indicator.configure(text_color="#e74c3c")
             self.status_label.configure(text="STOPPED")
-            self.start_btn.configure(state="normal")
-            self.stop_btn.configure(state="disabled")
+            self.start_btn.configure(state="normal", fg_color=START_COLOR)
+            self.stop_btn.configure(state="disabled", fg_color=STOP_IDLE)
 
         if hasattr(self, 'tray_icon') and self.tray_icon:
             try:
@@ -2044,6 +2192,7 @@ that ignore ordinary remapping tools.
 
 A key can:
   • Become any other key or combination
+  • Type text that ignores your keyboard layout
   • Launch a program, app, file or website
   • Send volume, media and browser keys
   • Do nothing at all, so it cannot misfire
@@ -2055,8 +2204,8 @@ GETTING STARTED
   1. "Key Mappings" tab → "+ Add Mapping"
   2. Click 🎯 Detect and press the key you want to
      change (or type its name)
-  3. Choose what it should do: send keys, launch an
-     app, or open a website
+  3. Choose what it should do: send keys, type text,
+     launch an app, or open a website
   4. Click "Add" — the rule is saved immediately
   5. Click "▶ Start" at the top to make it live
 
@@ -2070,7 +2219,7 @@ THE FOUR TABS
   Key Mappings  turn keys into other keys or actions
   Blocked Keys  disable keys outright
   Copilot Key   repurpose the dedicated Copilot key
-  Settings      pause hotkey, startup, reset
+  Settings      pause hotkey, startup, typing, reset
 
 KEY MAPPINGS
 ────────────
@@ -2084,15 +2233,39 @@ and use "Remove Selected" / "Toggle On/Off".
 
 LAUNCH AN APP FROM A KEY
 ──────────────────────
-"What should it do?" offers three things:
+"What should it do?" offers four things:
   • Send other key(s) — the classic remap, with a
     picker for volume, media, function and browser keys
+  • Type text — see below
   • Launch a program or app — pick Calculator,
     Explorer, Terminal and friends, browse for an .exe,
     or paste shell:AppsFolder\\… for a Store app
   • Open a website — any URL, in your default browser
 ▶ Test runs it once without pressing the key, so you
 can check a path before you commit to it.
+
+TYPE TEXT (LAYOUT-INDEPENDENT)
+──────────────────────────────
+"Send other key(s)" sends a key POSITION, and Windows
+turns it into a character using your current layout.
+Map a key to "period" and it types "." in English but
+"ю" in Russian - the remap follows the layout.
+
+"Type text" sends the characters themselves, so they
+come out the same in every layout:
+  • rctrl → "."   and   shift+rctrl → ","
+    a dedicated period/comma key in any layout
+  • ctrl+alt+m → your email address
+Shift does not change typed text, so give a shifted
+character its own rule, as above. Holding the key
+repeats the text, like any other key.
+
+Two limits: games that read raw keyboard input do not
+see typed text (it is for typing, not gaming), and the
+characters go wherever the keyboard focus is.
+
+Settings → "Typing text" pauses every text rule at
+once without deleting them; paused rules show "(off)".
 
 BLOCKED KEYS
 ────────────
@@ -2236,7 +2409,7 @@ welcome to buy me a coffee - the button is below.
             command=lambda: webbrowser.open(PROJECT_URL),
             width=120,
             fg_color="#4a4a4a",
-            hover_color="#5f5f5f"
+            hover_color=GRAY_BUTTON_HOVER
         ).pack(side="left", padx=6)
 
         ctk.CTkButton(

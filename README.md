@@ -18,7 +18,7 @@ Option to auto-start at launch for uninterruped remapping and key blocking:
 
 <img width="581" height="599" alt="image" src="https://github.com/user-attachments/assets/34bb324d-f407-4ece-9f4e-0d6b9ed7bd9c" />
 
-**Version 2.4** | Built by Li Fan, 2026
+**Version 2.5** | Built by Li Fan, 2026
 
 📥 **Download**: Grab `KeyRemapper.exe` from the
 [latest release](https://github.com/linkmodo/key_remapper/releases/latest) — a single file, no
@@ -29,6 +29,22 @@ Runs as a normal user. Administrator rights are only needed if you want it to af
 windows that themselves run elevated (some games, Task Manager, etc.).
 
 > *Created out of frustration at being unable to disable or remap keys within a particular game.*
+
+## ✨ What's New in Version 2.5
+
+- **Type text that ignores your keyboard layout** — a new *Type text* action sends
+  characters instead of keys, so switching between, say, English and Russian no longer
+  changes what a remapped key types. Map Right Ctrl to `.` and Shift+Right Ctrl to `,`
+  and you have a dedicated period/comma key in every layout.
+  See [Type text](#-type-text-layout-independent)
+- **Basic text expansion for free** — the same action types whole strings: an email
+  address, a signature, a snippet
+- **A switch to pause it all** — Settings → *Typing text* turns every text rule off and
+  on again at once; the rules are kept and show as *(off)* while paused
+- **Clearer buttons** — whichever of Start/Stop is inactive keeps readable text on a
+  darker fill, and gray buttons now light up blue on hover instead of a barely
+  different gray
+- **127 unit tests**, up from 104
 
 ## ✨ What's New in Version 2.4
 
@@ -103,6 +119,7 @@ windows that themselves run elevated (some games, Task Manager, etc.).
 - **Gaming Compatible**: Uses low-level Windows hooks (`SetWindowsHookEx`) that work with most games and applications
 - **Key Combinations**: Remap single keys to key combinations (e.g., `F1` → `Ctrl+S`, `F2` → `Ctrl+Shift+S`)
 - **Launch Apps and Websites**: Point a key at Calculator, any `.exe`, a Store app or a URL
+- **Layout-Independent Text**: Type characters or whole strings that come out the same in every keyboard layout
 - **Multimedia Keys**: Mute, volume, play/pause, track skip and the browser keys, from a picker
 - **Key Blocking**: Completely disable specific keys to prevent accidental presses during gaming (e.g., block `/` key)
 - **Copilot Key Control**: Detect and repurpose the dedicated Copilot key found on 2024+ laptops
@@ -195,6 +212,7 @@ Fair. You have three options, in order of paranoia:
 
    | Release | SHA-256 |
    |---------|---------|
+   | v2.5.0 | `e8f3a50413c93744e3cc36e0f9957dc637adb942d1a468cdd1b1044ad94b2f55` |
    | v2.4.0 | `2cb3995c8c40374c681e4a76bd0914e9841721cf86af7ca76ddf64d450a0342b` |
    | v2.3.0 | `883f407b5b61655076cc8e57d2bb50c1d2f74ba9e837bf16b2dfc09e34e4eff9` |
    | v2.2.0 | `44e158dd07c9a9b9d6c1ca109fbe19b2d546778de95515fb5bf35c52805b48a0` |
@@ -294,6 +312,7 @@ A mapping does not have to send keys. In **Add Mapping**, *What should it do?* o
 | Action | What you fill in |
 |--------|------------------|
 | **Send other key(s)** | A key or combination — with a picker for volume, media, function and browser keys |
+| **Type text** | Characters to type, whatever the keyboard layout — see [Type text](#-type-text-layout-independent) |
 | **Launch a program or app** | Pick from the common apps list, **📂 Browse** for an `.exe`, or type anything the shell can open |
 | **Open a website** | Any URL — it opens in your default browser |
 
@@ -318,6 +337,37 @@ press Fn+F12 → *Launch a program or app* → **Calculator** → **Add**.
 
 Launching happens on a worker thread, never inside the keyboard hook: a low-level hook
 that takes longer than `LowLevelHooksTimeout` is silently removed by Windows.
+
+### ✎ Type text (layout-independent)
+
+**Why it exists.** *Send other key(s)* sends a virtual key — a *position* on the keyboard.
+The app receiving it turns that into a character using whatever layout is active. So a
+rule sending `period` types `.` in English but `ю` in Russian: the remap follows the layout.
+That is how every virtual-key remapper behaves, PowerToys included.
+
+*Type text* sends the **characters themselves** (`SendInput` with `KEYEVENTF_UNICODE`),
+which no layout can reinterpret.
+
+| Source | Type text | Result |
+|--------|-----------|--------|
+| `rctrl` | `.` | Right Ctrl is a period key in every layout |
+| `shift+rctrl` | `,` | …and Shift+Right Ctrl a comma |
+| `ctrl+alt+m` | `me@example.com` | Text expansion |
+| `f13` | `—` | A character your layout has no key for |
+
+**▶ Test** in the dialog types the text into a box right there, so you can see exactly
+what comes out. Whitespace is kept — `, ` (comma space) and a lone space are valid.
+
+Things to know:
+
+- **Shift does not change typed text** — it is a literal character, not a key. Give the
+  shifted character its own rule, as with `shift+rctrl` above.
+- **Holding the key repeats the text**, the same as holding a normal key.
+- **Games that read raw keyboard input won't see it.** Typed characters arrive as text
+  (`WM_CHAR`), not as key presses. This is a typing feature, not a gaming one — use
+  *Send other key(s)* for games.
+- **Settings → Typing text** pauses every text rule at once. The keys go back to normal,
+  the rules are kept, and the list marks them *(off)* until you switch it back on.
 
 ### ⌨️ The Fn key
 
@@ -476,7 +526,7 @@ Everything is saved to `%APPDATA%\KeyRemapper\key_remap_config.json`:
 
 ```json
 {
-    "version": 5,
+    "version": 6,
     "mappings": [
         {
             "source": "CAPSLOCK",
@@ -497,6 +547,16 @@ Everything is saved to `%APPDATA%\KeyRemapper\key_remap_config.json`:
             "app": "",
             "enabled": true,
             "description": "Calculator"
+        },
+        {
+            "source": "RCTRL",
+            "target": "",
+            "action": "text",
+            "value": ".",
+            "hold": "",
+            "app": "",
+            "enabled": true,
+            "description": "Period in every layout"
         }
     ],
     "blocked_keys": [
@@ -520,12 +580,14 @@ Everything is saved to `%APPDATA%\KeyRemapper\key_remap_config.json`:
         "tap_timeout_ms": 250,
         "run_at_startup": false,
         "start_minimized": false,
-        "start_on_launch": false
+        "start_on_launch": false,
+        "type_text_enabled": true
     }
 }
 ```
 
-A mapping's `action` is `keys` (send `target`), `launch` or `url` (open `value`).
+A mapping's `action` is `keys` (send `target`), `text` (type `value` literally), or
+`launch` / `url` (open `value`). `type_text_enabled` is the Settings switch for text rules.
 Copilot `mode` is one of `disable`, `keys`, `launch`, `url` or `passthrough`.
 Older config files load unchanged — missing fields and sections fall back to defaults.
 
@@ -535,9 +597,10 @@ Older config files load unchanged — missing fields and sections fall back to d
 python -m unittest discover -s tests
 ```
 
-104 tests drive the rule engine directly (no real hooks, no keyboard input needed), covering
+127 tests drive the rule engine directly (no real hooks, no keyboard input needed), covering
 remaps, blocks, per-app scoping, dual-role keys, the pause hotkey, the Copilot chord, the mouse
-hook, app-launching mappings, raw key codes, the single-instance guard and config
+hook, app-launching mappings, layout-independent text (including the exact `SendInput`
+events it produces), raw key codes, the single-instance guard and config
 round-tripping — including that configs written by earlier versions still load.
 
 ## Troubleshooting
@@ -603,7 +666,10 @@ it is hidden reopens the window rather than starting a second copy.
 
 - Uses `SetWindowsHookEx` with `WH_KEYBOARD_LL` for low-level keyboard interception
 - The hook is installed and pumped on a dedicated thread, so UI work can never stall input
-- Injects replacement keys using `SendInput` API
+- Injects replacement keys using `SendInput` API, as virtual keys — so the active layout
+  decides the character, exactly as for a physical key
+- *Type text* rules instead send `KEYEVENTF_UNICODE` packets (`wVk = 0`, the character in
+  `wScan`), which bypass the layout entirely; the whole string goes in one `SendInput` call
 - Marks injected events (`dwExtraInfo`) to prevent infinite loops
 - Combinations are matched as (modifier families, main key) signatures
 - Slow actions (launching apps, opening URLs) run on a worker thread — a low-level hook that

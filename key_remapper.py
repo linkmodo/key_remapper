@@ -53,6 +53,7 @@ LLKHF_LOWER_IL_INJECTED = 0x00000002
 
 # Key event types
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_SCANCODE = 0x0008
 KEYEVENTF_EXTENDEDKEY = 0x0001
 
@@ -64,7 +65,7 @@ INPUT_KEYBOARD = 1
 DUMMY_KEY = 0xFF
 
 APP_NAME = "KeyRemapper"
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 
 # Where users can find the project and support it
 PROJECT_URL = "https://github.com/linkmodo/key_remapper"
@@ -554,9 +555,16 @@ HOOKPROC = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, ctypes
 MOUSEHOOKPROC = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, ctypes.POINTER(MSLLHOOKSTRUCT))
 
 
-# What a mapping does when it fires. "keys" sends target_keys; "launch" starts
-# a program, file or shell command; "url" opens a web address.
-MAPPING_ACTIONS = ("keys", "launch", "url")
+# What a mapping does when it fires. "keys" sends target_keys; "text" types
+# `value` as literal characters; "launch" starts a program, file or shell
+# command; "url" opens a web address.
+#
+# "keys" and "text" differ in one important way. A virtual key is a position
+# on the keyboard, and the app receiving it turns it into a character through
+# whatever layout is active - so "period" types "." in English and "ю" in
+# Russian. "text" sends the character itself (KEYEVENTF_UNICODE), which no
+# layout can reinterpret.
+MAPPING_ACTIONS = ("keys", "text", "launch", "url")
 
 
 @dataclass
@@ -595,6 +603,9 @@ class Settings:
     run_at_startup: bool = False
     start_minimized: bool = False
     start_on_launch: bool = False    # activate the remapper as soon as the app opens
+    # Master switch for "text" rules. Off, they step aside and the physical
+    # key does whatever it normally does - rules are kept, not deleted.
+    type_text_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -697,6 +708,7 @@ def settings_from_dict(data: Optional[Dict]) -> Settings:
         run_at_startup=bool(data.get("run_at_startup", False)),
         start_minimized=bool(data.get("start_minimized", False)),
         start_on_launch=bool(data.get("start_on_launch", False)),
+        type_text_enabled=bool(data.get("type_text_enabled", True)),
     )
 
 
@@ -942,6 +954,9 @@ class KeyRemapper:
             return f"▶ {mapping.value}"
         if mapping.action == "url":
             return f"🌐 {mapping.value}"
+        if mapping.action == "text":
+            # repr-style quoting keeps a lone space or comma visible
+            return f"✎ “{mapping.value}”"
         return self.vk_to_string(mapping.target_keys)
 
     @staticmethod
@@ -1016,9 +1031,12 @@ class KeyRemapper:
                 value = ""
             else:
                 target_keys = ()
-                value = value.strip()
+                # Whitespace is content for text (", " or a trailing space),
+                # but only noise around a path or URL
+                if action != "text":
+                    value = value.strip()
                 if not value:
-                    logger.warning("A %s mapping needs a program or URL", action)
+                    logger.warning("A %s mapping needs a value", action)
                     return False
                 if hold_keys:
                     logger.warning("Hold roles only work with the 'keys' action")
@@ -1258,6 +1276,37 @@ class KeyRemapper:
         
         user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
     
+    def _send_text(self, text: str):
+        """
+        Type literal characters, independent of the keyboard layout.
+
+        Each UTF-16 code unit goes out as a KEYEVENTF_UNICODE down/up pair: the
+        character rides in wScan and arrives as VK_PACKET, so nothing downstream
+        maps it through a layout. Characters outside the BMP (emoji) are two
+        code units and are sent as both halves of the surrogate pair.
+
+        All events go in a single SendInput call so another program's input
+        cannot land in the middle of the text.
+        """
+        data = text.encode('utf-16-le')
+        units = [int.from_bytes(data[i:i + 2], 'little') for i in range(0, len(data), 2)]
+        if not units:
+            return
+
+        events = (INPUT * (len(units) * 2))()
+        for index, unit in enumerate(units):
+            for offset, flags in ((0, KEYEVENTF_UNICODE),
+                                  (1, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)):
+                event = events[index * 2 + offset]
+                event.type = INPUT_KEYBOARD
+                event.union.ki.wVk = 0
+                event.union.ki.wScan = unit
+                event.union.ki.dwFlags = flags
+                event.union.ki.time = 0
+                event.union.ki.dwExtraInfo = self._injection_marker
+
+        user32.SendInput(len(events), events, ctypes.sizeof(INPUT))
+
     def _send_key_combination(self, vk_codes: Tuple[int, ...], key_up: bool = False):
         """Send a key combination"""
         if key_up:
@@ -1383,8 +1432,10 @@ class KeyRemapper:
         self._action_queue.put((action, value))
 
     def run_action(self, action: str, value: str):
-        """Run a launch/url action right now (used by the Test buttons)."""
-        if action in ("launch", "url") and value.strip():
+        """Run an action right now (used by the Test buttons)."""
+        if action == "text" and value:
+            self._send_text(value)
+        elif action in ("launch", "url") and value.strip():
             self._queue_action(action, value)
 
     def _ensure_action_worker(self):
@@ -1620,8 +1671,26 @@ class KeyRemapper:
             self.state.suppressed_keys[vk_code] = None
             return True
 
+        # A text rule with typing switched off in Settings steps aside
+        # entirely, so the physical key is back to doing its normal job
+        if (mapping is not None and mapping.action == "text"
+                and not self.settings.type_text_enabled):
+            mapping = None
+
         # 3. Remapped keys
         if mapping is not None and mapping.enabled:
+            if mapping.action == "text":
+                # Typed on every press, auto-repeat included - holding the
+                # key repeats the text just as holding "." repeats a dot.
+                # Held modifiers are left alone: a Unicode packet is not
+                # altered by Shift, and releasing them would break whatever
+                # the user types next while still holding them.
+                self.state.suppressed_keys[vk_code] = None
+                if 'win' in families:
+                    self._send_dummy_key()
+                self._send_text(mapping.value)
+                return True
+
             if mapping.action in ("launch", "url"):
                 self.state.suppressed_keys[vk_code] = None
                 # Same courtesy as the Copilot key: don't let a held Windows
@@ -1820,7 +1889,7 @@ class KeyRemapper:
             copilot = self.copilot
             settings = self.settings
             config = {
-                "version": 5,
+                "version": 6,
                 "mappings": [
                     {
                         "source": self.vk_to_string(m.source_keys),
@@ -1849,6 +1918,7 @@ class KeyRemapper:
                     "run_at_startup": settings.run_at_startup,
                     "start_minimized": settings.start_minimized,
                     "start_on_launch": settings.start_on_launch,
+                    "type_text_enabled": settings.type_text_enabled,
                 },
                 "copilot": {
                     "enabled": copilot.enabled,
@@ -2320,8 +2390,10 @@ def interactive_menu(remapper: KeyRemapper):
                     continue
 
                 print("\nWhat should it do?")
-                print("  1. Send other key(s)   2. Launch a program or app   3. Open a website")
-                action = {'2': 'launch', '3': 'url'}.get(input("Choice [1]: ").strip(), 'keys')
+                print("  1. Send other key(s)   2. Type text (ignores keyboard layout)")
+                print("  3. Launch a program or app   4. Open a website")
+                action = {'2': 'text', '3': 'launch', '4': 'url'}.get(
+                    input("Choice [1]: ").strip(), 'keys')
 
                 target = value = hold = ""
                 if action == 'keys':
@@ -2329,6 +2401,11 @@ def interactive_menu(remapper: KeyRemapper):
                     if not target:
                         continue
                     hold = input("When held instead (optional, single keys only): ").strip()
+                elif action == 'text':
+                    # Not stripped: a trailing space or ", " is intentional
+                    value = input("Text to type (exactly as entered): ")
+                    if not value:
+                        continue
                 elif action == 'launch':
                     print("\nCommon apps: " + ", ".join(name for name, _ in COMMON_APPS))
                     value = input("Program, file or app (name or full path): ").strip()

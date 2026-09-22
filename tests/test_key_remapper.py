@@ -18,6 +18,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Keep every test run away from the real %APPDATA%\KeyRemapper: the module
+# opens its log there the moment it is imported. (Microsoft Store Python would
+# otherwise write into its private, virtualised copy of AppData - which is how
+# this went unnoticed for a while.)
+TEST_HOME = tempfile.mkdtemp(prefix="keyremapper-tests-")
+os.environ['APPDATA'] = TEST_HOME
+os.environ['LOCALAPPDATA'] = TEST_HOME
+
 import key_remapper as kr  # noqa: E402
 
 
@@ -931,6 +939,326 @@ class KeyReferenceTests(unittest.TestCase):
         self.assertNotIn('fn', {k['name'] for k in self.keys})
 
 
+class NumpadShiftTests(unittest.TestCase):
+    """
+    Windows' Shift+Numpad trick, replayed from sequences recorded on a live
+    hook (NumLock on). ``game()`` is what an application actually receives:
+    every event the hook lets through, plus every key the remapper sends.
+    """
+
+    V = kr.VirtualKey
+    LSHIFT, RSHIFT = int(V.VK_LSHIFT), int(V.VK_RSHIFT)
+    UP, HOME, PGUP, CLEAR = int(V.VK_UP), int(V.VK_HOME), int(V.VK_PRIOR), int(V.VK_CLEAR)
+    NUM8, NUM7, NUM9, NUM5 = (int(V.VK_NUMPAD8), int(V.VK_NUMPAD7),
+                              int(V.VK_NUMPAD9), int(V.VK_NUMPAD5))
+
+    # (direction, vk, scan code, extended) exactly as the hook reported them
+    SHIFT_NUM8 = [
+        ('down', LSHIFT, 0x02A, False),
+        ('up', LSHIFT, 0x22A, False),       # fake release
+        ('down', UP, 0x048, False),
+        ('up', UP, 0x048, False),
+        ('down', LSHIFT, 0x02A, False),     # Windows pressing Shift again
+        ('up', LSHIFT, 0x02A, False),       # the user letting go
+    ]
+
+    def setUp(self):
+        self.remapper = FakeRemapper()
+        self.enable(True)
+
+    def enable(self, on):
+        self.remapper.apply_settings(kr.Settings(numpad_ignores_shift=on))
+
+    def game(self, events):
+        delivered = []
+        for direction, vk, scan, extended in events:
+            before = len(self.remapper.sent)
+            swallowed = self.remapper._handle_key_event(
+                vk, direction == 'down', direction == 'up', scan, extended)
+            delivered += [(d, v) for v, d in self.remapper.sent[before:]]
+            if not swallowed:
+                delivered.append((direction, vk))
+        return delivered
+
+    def shift_released_while_numpad_down(self, delivered, shift):
+        """Did the game see Shift let go between the digit's down and up?"""
+        numpad_down = False
+        for direction, vk in delivered:
+            if vk in (self.NUM8, self.NUM7, self.NUM9, self.NUM5):
+                numpad_down = direction == 'down'
+            elif vk == shift and direction == 'up' and numpad_down:
+                return True
+        return False
+
+    # --- the recorded sequences --------------------------------------------
+
+    def test_shift_numpad8_arrives_as_numpad8_with_shift_held(self):
+        delivered = self.game(self.SHIFT_NUM8)
+        self.assertIn(('down', self.NUM8), delivered)
+        self.assertIn(('up', self.NUM8), delivered)
+        self.assertNotIn(('down', self.UP), delivered, "no arrow key reaches the game")
+        self.assertFalse(self.shift_released_while_numpad_down(delivered, self.LSHIFT))
+        self.assertEqual(delivered.count(('up', self.LSHIFT)), 1,
+                         "Shift is released once - when the user lets go")
+
+    def test_right_shift(self):
+        delivered = self.game([
+            ('down', self.RSHIFT, 0x036, True),
+            ('up', self.RSHIFT, 0x236, True),      # fake release, right side
+            ('down', self.UP, 0x048, False),
+            ('up', self.UP, 0x048, False),
+            ('down', self.RSHIFT, 0x036, True),
+            ('up', self.RSHIFT, 0x036, True),
+        ])
+        self.assertIn(('down', self.NUM8), delivered)
+        self.assertEqual(delivered.count(('up', self.RSHIFT)), 1)
+
+    def test_holding_the_key_repeats_the_digit(self):
+        delivered = self.game([
+            ('down', self.LSHIFT, 0x02A, False),
+            ('up', self.LSHIFT, 0x22A, False),
+            ('down', self.UP, 0x048, False),
+            ('down', self.UP, 0x048, False),       # auto-repeat: no new fake
+            ('down', self.UP, 0x048, False),
+            ('up', self.UP, 0x048, False),
+            ('down', self.LSHIFT, 0x02A, False),
+            ('up', self.LSHIFT, 0x02A, False),
+        ])
+        self.assertEqual(delivered.count(('down', self.NUM8)), 3)
+        self.assertEqual(delivered.count(('up', self.NUM8)), 1)
+        self.assertNotIn(('down', self.UP), delivered)
+
+    def test_two_numpad_keys_at_once(self):
+        """Windows interleaves several fakes, including fake *presses*."""
+        delivered = self.game([
+            ('down', self.LSHIFT, 0x02A, False),
+            ('up', self.LSHIFT, 0x22A, False),
+            ('down', self.UP, 0x048, False),
+            ('down', self.LSHIFT, 0x22A, False),   # fake press
+            ('up', self.LSHIFT, 0x22A, False),
+            ('down', self.PGUP, 0x049, False),
+            ('up', self.PGUP, 0x049, False),
+            ('down', self.LSHIFT, 0x02A, False),
+            ('up', self.LSHIFT, 0x22A, False),
+            ('up', self.UP, 0x048, False),
+            ('down', self.LSHIFT, 0x22A, False),
+            ('up', self.LSHIFT, 0x02A, False),
+        ])
+        for digit in (self.NUM8, self.NUM9):
+            self.assertIn(('down', digit), delivered)
+            self.assertIn(('up', digit), delivered)
+        self.assertNotIn(('down', self.UP), delivered)
+        self.assertNotIn(('down', self.PGUP), delivered)
+        self.assertFalse(self.shift_released_while_numpad_down(delivered, self.LSHIFT))
+
+    def test_numpad5_which_windows_calls_clear(self):
+        delivered = self.game([
+            ('down', self.LSHIFT, 0x02A, False), ('up', self.LSHIFT, 0x22A, False),
+            ('down', self.CLEAR, 0x04C, False), ('up', self.CLEAR, 0x04C, False),
+        ])
+        self.assertIn(('down', self.NUM5), delivered)
+
+    def test_every_numpad_key_maps_to_its_digit(self):
+        pairs = {
+            'insert': 'num0', 'end': 'num1', 'down': 'num2', 'pagedown': 'num3',
+            'left': 'num4', 'right': 'num6', 'home': 'num7', 'up': 'num8',
+            'pageup': 'num9', 'delete': 'numdecimal',
+        }
+        for nav, digit in pairs.items():
+            nav_vk = int(kr.KEY_NAME_TO_VK[nav])
+            with self.subTest(nav=nav):
+                self.assertEqual(kr.NUMPAD_NAV_TO_DIGIT[nav_vk], int(kr.KEY_NAME_TO_VK[digit]))
+        self.assertEqual(kr.NUMPAD_NAV_TO_DIGIT[self.CLEAR], self.NUM5)
+
+    # --- what must be left alone --------------------------------------------
+
+    def test_real_arrow_keys_are_never_touched(self):
+        """The arrow cluster is extended, and Windows fakes nothing for it."""
+        delivered = self.game([
+            ('down', self.LSHIFT, 0x02A, False),
+            ('down', self.UP, 0x048, True),
+            ('up', self.UP, 0x048, True),
+            ('up', self.LSHIFT, 0x02A, False),
+        ])
+        self.assertEqual(delivered, [('down', self.LSHIFT), ('down', self.UP),
+                                     ('up', self.UP), ('up', self.LSHIFT)])
+
+    def test_numlock_off_navigation_is_left_alone(self):
+        """NumLock off: Shift+numpad arrow selects text; no fake Shift, no change."""
+        delivered = self.game([
+            ('down', self.LSHIFT, 0x02A, False),
+            ('down', self.UP, 0x048, False),
+            ('up', self.UP, 0x048, False),
+            ('up', self.LSHIFT, 0x02A, False),
+        ])
+        self.assertIn(('down', self.UP), delivered)
+        self.assertNotIn(('down', self.NUM8), delivered)
+
+    def test_off_by_default(self):
+        self.assertFalse(kr.Settings().numpad_ignores_shift)
+        self.assertFalse(kr.settings_from_dict({}).numpad_ignores_shift)
+
+    def test_switched_off_windows_behaves_as_usual(self):
+        self.enable(False)
+        delivered = self.game(self.SHIFT_NUM8)
+        self.assertIn(('up', self.LSHIFT), delivered[:2], "the fake release goes through")
+        self.assertIn(('down', self.UP), delivered)
+        self.assertNotIn(('down', self.NUM8), delivered)
+
+    def test_paused_windows_behaves_as_usual(self):
+        self.remapper.set_paused(True)
+        delivered = self.game(self.SHIFT_NUM8)
+        self.assertIn(('down', self.UP), delivered)
+
+    # --- interaction with the rest of the engine ----------------------------
+
+    def test_rules_see_the_real_digit(self):
+        self.remapper.add_mapping('shift+num8', 'f13')
+        delivered = self.game(self.SHIFT_NUM8)
+        self.assertIn(('down', F13), delivered)
+        self.assertNotIn(('down', self.NUM8), delivered, "the rule replaced it")
+
+    def test_a_blocked_digit_stays_blocked(self):
+        # Blocks match modifiers exactly, so it is shift+num8 that is pressed
+        self.remapper.block_key('shift+num8')
+        delivered = self.game(self.SHIFT_NUM8)
+        self.assertNotIn(('down', self.NUM8), delivered)
+        self.assertNotIn(('down', self.UP), delivered)
+
+    def test_switching_off_mid_press_does_not_leave_the_digit_stuck(self):
+        delivered = self.game(self.SHIFT_NUM8[:3])      # Shift, fake up, Num8 down
+        self.enable(False)
+        delivered += self.game(self.SHIFT_NUM8[3:])
+        self.assertIn(('up', self.NUM8), delivered)
+
+    def test_pausing_releases_a_held_digit(self):
+        self.game(self.SHIFT_NUM8[:3])
+        self.remapper.sent.clear()
+        self.remapper.set_paused(True)
+        self.assertIn((self.NUM8, 'up'), self.remapper.sent)
+
+    def test_detect_records_the_digit(self):
+        captured = []
+        self.remapper._capture_callback = captured.append
+        self.game(self.SHIFT_NUM8[:3])
+        self.assertEqual(captured[0].key_string(), 'shift+num8')
+
+    def test_setting_survives_a_save(self):
+        path = Path(tempfile.mkdtemp()) / "numpad.json"
+        self.remapper.save_config(path)
+        loaded = FakeRemapper()
+        loaded.load_config(path)
+        self.assertTrue(loaded.settings.numpad_ignores_shift)
+
+    def test_the_setting_alone_is_reason_to_start(self):
+        """Someone who only wants this fix must still be able to press Start."""
+        plain = FakeRemapper()
+        self.assertFalse(plain.has_work())
+        plain.apply_settings(kr.Settings(numpad_ignores_shift=True))
+        self.assertTrue(plain.has_work())
+
+    def test_a_copilot_only_setup_is_reason_to_start(self):
+        plain = FakeRemapper()
+        plain.set_copilot(kr.CopilotConfig(enabled=True, mode='disable'))
+        self.assertTrue(plain.has_work())
+
+
+class TestIsolationTests(unittest.TestCase):
+
+    def test_tests_never_touch_the_real_settings_folder(self):
+        self.assertTrue(str(kr.CONFIG_DIR).startswith(TEST_HOME), kr.CONFIG_DIR)
+        self.assertTrue(str(kr.LOG_FILE).startswith(TEST_HOME), kr.LOG_FILE)
+
+
+class BackupTests(unittest.TestCase):
+    """Reset and Load replace everything, so they first save a safety copy."""
+
+    def setUp(self):
+        self.folder = Path(tempfile.mkdtemp()) / "backups"
+        self.remapper = FakeRemapper()
+        self.remapper.add_mapping('pgdn', 'end', hold='pgdn')
+        self.remapper.block_key('/')
+
+    def test_backup_holds_the_current_rules(self):
+        path = self.remapper.backup_config("reset", self.folder)
+        self.assertTrue(path.exists())
+        restored = FakeRemapper()
+        self.assertTrue(restored.load_config(path))
+        self.assertEqual(restored.list_mappings(), self.remapper.list_mappings())
+        self.assertEqual(restored.list_blocked_keys(), self.remapper.list_blocked_keys())
+
+    def test_backup_name_says_when_and_why(self):
+        path = self.remapper.backup_config("reset", self.folder)
+        self.assertRegex(path.name, r"^\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2} before reset\.json$")
+
+    def test_two_backups_in_the_same_second_both_survive(self):
+        first = self.remapper.backup_config("load", self.folder)
+        second = self.remapper.backup_config("load", self.folder)
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.exists() and second.exists())
+
+    def test_only_the_newest_backups_are_kept(self):
+        for _ in range(kr.BACKUPS_KEPT + 4):
+            self.remapper.backup_config("reset", self.folder)
+        self.assertEqual(len(list(self.folder.glob("*.json"))), kr.BACKUPS_KEPT)
+
+    def test_reset_after_a_backup_can_be_undone(self):
+        """The exact sequence that lost a real setup: reset, then load the backup."""
+        backup = self.remapper.backup_config("reset", self.folder)
+        rules = self.remapper.list_mappings()
+        self.remapper.reset_to_defaults()
+        self.assertEqual(self.remapper.list_mappings(), [])
+
+        self.assertTrue(self.remapper.load_config(backup))
+        self.assertEqual(self.remapper.list_mappings(), rules)
+
+    def test_unwritable_folder_reports_failure(self):
+        blocker = Path(tempfile.mkdtemp()) / "not-a-folder"
+        blocker.write_text("x", encoding="utf-8")
+        self.assertIsNone(self.remapper.backup_config("reset", blocker))
+
+
+class LoadValidationTests(unittest.TestCase):
+    """A file that isn't a setup must be refused *without* clearing anything."""
+
+    def setUp(self):
+        self.remapper = FakeRemapper()
+        self.remapper.add_mapping('pgdn', 'end')
+        self.remapper.block_key('/')
+        self.before = (self.remapper.list_mappings(), self.remapper.list_blocked_keys())
+        self.folder = Path(tempfile.mkdtemp())
+
+    def load(self, content):
+        path = self.folder / "file.json"
+        path.write_text(content, encoding="utf-8")
+        return self.remapper.load_config(path)
+
+    def assert_untouched(self):
+        self.assertEqual((self.remapper.list_mappings(), self.remapper.list_blocked_keys()),
+                         self.before)
+
+    def test_some_other_programs_json_is_refused(self):
+        self.assertFalse(self.load('{"theme": "dark", "fontSize": 12}'))
+        self.assert_untouched()
+
+    def test_a_json_list_is_refused(self):
+        self.assertFalse(self.load('[1, 2, 3]'))
+        self.assert_untouched()
+
+    def test_malformed_sections_are_refused(self):
+        self.assertFalse(self.load('{"mappings": "oops", "blocked_keys": []}'))
+        self.assert_untouched()
+
+    def test_broken_json_is_refused(self):
+        self.assertFalse(self.load('{ not json'))
+        self.assert_untouched()
+
+    def test_a_deliberately_empty_setup_is_still_accepted(self):
+        """An empty setup is a valid choice - it just has to *be* a setup."""
+        self.assertTrue(self.load('{"version": 7, "mappings": [], "blocked_keys": []}'))
+        self.assertEqual(self.remapper.list_mappings(), [])
+
+
 class MappingActionTests(unittest.TestCase):
     """A key can open an app or a website instead of sending keys."""
 
@@ -1099,7 +1427,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(raw['settings'], {
             'toggle_hotkey': 'ctrl+alt+f12', 'tap_timeout_ms': 175,
             'run_at_startup': True, 'start_minimized': True, 'start_on_launch': True,
-            'type_text_enabled': True,
+            'type_text_enabled': True, 'numpad_ignores_shift': False,
         })
 
         # And it all comes back

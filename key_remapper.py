@@ -48,6 +48,7 @@ WM_XBUTTONDOWN = 0x020B
 WM_XBUTTONUP = 0x020C
 XBUTTON1 = 0x0001
 XBUTTON2 = 0x0002
+LLKHF_EXTENDED = 0x00000001
 LLKHF_INJECTED = 0x00000010
 LLKHF_LOWER_IL_INJECTED = 0x00000002
 
@@ -65,7 +66,7 @@ INPUT_KEYBOARD = 1
 DUMMY_KEY = 0xFF
 
 APP_NAME = "KeyRemapper"
-__version__ = "2.5.1"
+__version__ = "2.6.0"
 
 # Where users can find the project and support it
 PROJECT_URL = "https://github.com/linkmodo/key_remapper"
@@ -80,6 +81,9 @@ def _default_config_dir() -> Path:
 
 CONFIG_DIR = _default_config_dir()
 CONFIG_FILE = CONFIG_DIR / "key_remap_config.json"
+# Automatic safety copies, made before anything replaces every rule at once
+# (Reset, Load). Only the newest BACKUPS_KEPT are kept.
+BACKUPS_KEPT = 10
 LOG_FILE = CONFIG_DIR / "key_remapper.log"
 
 # Older versions stored the config next to the script. Under a one-file build
@@ -519,6 +523,46 @@ def key_reference() -> List[Dict]:
     return groups
 
 
+# --- Shift + numpad with NumLock on -------------------------------------
+#
+# With NumLock on, Windows turns Shift+Numpad8 into the Up arrow. It does so
+# by *faking a Shift release*, sending the numpad key's navigation meaning, and
+# faking the Shift press again afterwards - recorded from a live hook:
+#
+#     down LSHIFT scan 0x02A     the real key
+#     up   LSHIFT scan 0x22A     <- fake release
+#     down UP     scan 0x048     <- numpad 8, without the "extended" flag
+#     up   UP     scan 0x048
+#     down LSHIFT scan 0x02A     <- Windows presses Shift again
+#
+# A game therefore sees Shift let go (sprint/crouch drops) and gets Up instead
+# of Numpad 8. Both halves are recognisable: the fake Shift events carry scan
+# code 0x22A (left) or 0x236 (right), which a real Shift never sends, and the
+# arrow cluster's own keys always carry the extended flag, which numpad keys
+# never do. So the fix can be exact - see _keep_numpad_digits.
+
+FAKE_SHIFT_SCANS = frozenset({0x22A, 0x236})
+
+SHIFT_VKS = frozenset({
+    int(VirtualKey.VK_SHIFT), int(VirtualKey.VK_LSHIFT), int(VirtualKey.VK_RSHIFT)
+})
+
+# What each numpad key turns into under Shift, and the digit it really is
+NUMPAD_NAV_TO_DIGIT: Dict[int, int] = {
+    int(VirtualKey.VK_INSERT): int(VirtualKey.VK_NUMPAD0),
+    int(VirtualKey.VK_END): int(VirtualKey.VK_NUMPAD1),
+    int(VirtualKey.VK_DOWN): int(VirtualKey.VK_NUMPAD2),
+    int(VirtualKey.VK_NEXT): int(VirtualKey.VK_NUMPAD3),
+    int(VirtualKey.VK_LEFT): int(VirtualKey.VK_NUMPAD4),
+    int(VirtualKey.VK_CLEAR): int(VirtualKey.VK_NUMPAD5),
+    int(VirtualKey.VK_RIGHT): int(VirtualKey.VK_NUMPAD6),
+    int(VirtualKey.VK_HOME): int(VirtualKey.VK_NUMPAD7),
+    int(VirtualKey.VK_UP): int(VirtualKey.VK_NUMPAD8),
+    int(VirtualKey.VK_PRIOR): int(VirtualKey.VK_NUMPAD9),
+    int(VirtualKey.VK_DELETE): int(VirtualKey.VK_DECIMAL),
+}
+
+
 # A combination is matched as (set-of-modifier-families, main key code)
 Signature = Tuple[frozenset, int]
 
@@ -701,6 +745,10 @@ class Settings:
     # Master switch for "text" rules. Off, they step aside and the physical
     # key does whatever it normally does - rules are kept, not deleted.
     type_text_enabled: bool = True
+    # Gaming: stop Windows turning Shift+Numpad into arrow keys (NumLock on).
+    # Off by default - outside games, Shift+Numpad-arrow selecting text is
+    # exactly what people expect.
+    numpad_ignores_shift: bool = False
 
 
 @dataclass(frozen=True)
@@ -740,6 +788,11 @@ class RemapperState:
     suppressed_keys: Dict[int, Optional[Tuple[int, ...]]] = field(default_factory=dict)
     # vk -> dual-role key waiting to resolve as tap or hold
     pending_dual: Dict[int, PendingDualRole] = field(default_factory=dict)
+    # Windows has faked a Shift release around a numpad key and not yet
+    # pressed Shift again
+    shift_faked_up: bool = False
+    # navigation vk -> numpad digit, for numpad keys converted on the way down
+    numpad_converted: Dict[int, int] = field(default_factory=dict)
 
 
 # --- Copilot key ------------------------------------------------------------
@@ -804,6 +857,7 @@ def settings_from_dict(data: Optional[Dict]) -> Settings:
         start_minimized=bool(data.get("start_minimized", False)),
         start_on_launch=bool(data.get("start_on_launch", False)),
         type_text_enabled=bool(data.get("type_text_enabled", True)),
+        numpad_ignores_shift=bool(data.get("numpad_ignores_shift", False)),
     )
 
 
@@ -1315,6 +1369,46 @@ class KeyRemapper:
                 self._send_key_combination(pending.mapping.hold_keys, key_up=True)
         self.state.pending_dual.clear()
 
+        # A converted numpad key still held down would otherwise stay down
+        for digit in self.state.numpad_converted.values():
+            self._send_key(digit, key_up=True)
+        self.state.numpad_converted.clear()
+        self.state.shift_faked_up = False
+
+    def backup_config(self, reason: str, directory: Path = None) -> Optional[Path]:
+        """
+        Save the current rules and settings to a timestamped safety copy.
+
+        Called before Reset and Load, which both replace everything at once -
+        so neither can lose a setup that was never saved anywhere else.
+        Returns the file written, or None if it could not be written.
+        """
+        folder = Path(directory) if directory else CONFIG_DIR / "backups"
+        stamp = time.strftime("%Y-%m-%d %H-%M-%S")
+        path = folder / f"{stamp} before {reason}.json"
+        counter = 2
+        while path.exists():                       # two backups in the same second
+            path = folder / f"{stamp} before {reason} ({counter}).json"
+            counter += 1
+
+        if not self.save_config(path):
+            return None
+        logger.info("Backed up the current setup to %s", path)
+
+        # Keep the folder from growing forever
+        backups = sorted(folder.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+        for old in backups[BACKUPS_KEPT:]:
+            try:
+                old.unlink()
+            except OSError:
+                logger.debug("Could not remove old backup %s", old, exc_info=True)
+        return path
+
+    def has_work(self) -> bool:
+        """True when starting the hook would change anything."""
+        return bool(self.mappings or self.blocked_keys or self.copilot.enabled
+                    or self.settings.numpad_ignores_shift)
+
     def reset_to_defaults(self):
         """
         Wipe every rule and setting, returning the remapper to a fresh install.
@@ -1690,12 +1784,65 @@ class KeyRemapper:
     # ------------------------------------------------------------------
 
     def _handle_key_event(self, vk_code: int, is_keydown: bool, is_keyup: bool,
-                          scan_code: int = 0) -> bool:
+                          scan_code: int = 0, extended: bool = False) -> bool:
         """
         Shared keyboard/mouse rule engine.
 
         Returns True when the event should be swallowed.
         """
+        digit = self._keep_numpad_digits(vk_code, is_keydown, is_keyup, scan_code, extended)
+        if digit is True:
+            return True                # a fake Shift event: swallowed
+        if digit:
+            # The numpad key the user really pressed goes through the rules like
+            # any other key; if nothing claims it, it is delivered as itself
+            if not self._process_key_event(digit, is_keydown, is_keyup, scan_code):
+                self._send_key(digit, key_up=is_keyup)
+            return True
+
+        return self._process_key_event(vk_code, is_keydown, is_keyup, scan_code)
+
+    def _keep_numpad_digits(self, vk_code: int, is_keydown: bool, is_keyup: bool,
+                            scan_code: int, extended: bool):
+        """
+        Undo Windows' Shift+Numpad trick (see FAKE_SHIFT_SCANS).
+
+        Returns True to swallow a fake Shift event, the numpad digit a
+        navigation event really came from, or None to leave the event alone.
+        """
+        held = self.state.numpad_converted
+
+        # A key converted on the way down is converted on the way up too, even
+        # if the setting was switched off or the remapper paused meanwhile -
+        # otherwise the digit would be left stuck down
+        if is_keyup and not extended and vk_code in held:
+            return held.pop(vk_code)
+
+        if not self.settings.numpad_ignores_shift or self.paused:
+            return None
+
+        if scan_code in FAKE_SHIFT_SCANS:
+            # Swallowing the fake release is what keeps Shift held in the game
+            self.state.shift_faked_up = is_keyup
+            return True
+
+        if vk_code in SHIFT_VKS:
+            # Windows pressing Shift again, or the user really letting go
+            self.state.shift_faked_up = False
+            return None
+
+        if extended or not is_keydown:
+            return None                # the real arrow cluster, and plain releases
+
+        digit = NUMPAD_NAV_TO_DIGIT.get(vk_code)
+        if digit and (self.state.shift_faked_up or vk_code in held):
+            held[vk_code] = digit      # auto-repeat keeps converting while held
+            return digit
+        return None
+
+    def _process_key_event(self, vk_code: int, is_keydown: bool, is_keyup: bool,
+                           scan_code: int = 0) -> bool:
+        """The rules themselves. Returns True when the event should be swallowed."""
         family = MODIFIER_FAMILY.get(vk_code)
 
         # Track physical key state
@@ -1822,6 +1969,7 @@ class KeyRemapper:
                 wParam in (WM_KEYDOWN, WM_SYSKEYDOWN),
                 wParam in (WM_KEYUP, WM_SYSKEYUP),
                 kb.scanCode,
+                bool(kb.flags & LLKHF_EXTENDED),
             ):
                 return 1
 
@@ -1984,7 +2132,7 @@ class KeyRemapper:
             copilot = self.copilot
             settings = self.settings
             config = {
-                "version": 6,
+                "version": 7,
                 "mappings": [
                     {
                         "source": self.vk_to_string(m.source_keys),
@@ -2014,6 +2162,7 @@ class KeyRemapper:
                     "start_minimized": settings.start_minimized,
                     "start_on_launch": settings.start_on_launch,
                     "type_text_enabled": settings.type_text_enabled,
+                    "numpad_ignores_shift": settings.numpad_ignores_shift,
                 },
                 "copilot": {
                     "enabled": copilot.enabled,
@@ -2052,6 +2201,17 @@ class KeyRemapper:
 
             with open(filepath, 'r', encoding='utf-8') as f:
                 config = json.load(f)
+
+            # Check it really is a setup *before* clearing anything: any other
+            # JSON file would otherwise wipe every rule and load nothing
+            known = ("mappings", "blocked_keys", "settings", "copilot")
+            if not isinstance(config, dict) or not any(k in config for k in known):
+                logger.warning("%s is not a Key Remapper configuration", filepath)
+                return False
+            for section in ("mappings", "blocked_keys"):
+                if not isinstance(config.get(section, []), list):
+                    logger.warning("%s has a malformed %s section", filepath, section)
+                    return False
 
             with self._lock:
                 self.mappings.clear()
@@ -2660,8 +2820,8 @@ def interactive_menu(remapper: KeyRemapper):
             elif choice.lower() == 's':
                 if remapper.running:
                     print("Remapper is already running.")
-                elif not remapper.mappings and not remapper.blocked_keys:
-                    print("No mappings or blocked keys configured. Add some first.")
+                elif not remapper.has_work():
+                    print("Nothing to do yet - add a mapping, a blocked key or a Copilot action.")
                 else:
                     if remapper.start():
                         print("\n✓ Remapper started!")

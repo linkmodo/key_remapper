@@ -20,7 +20,7 @@ Easily visualize all available mapping options:
 Ignore keyboard layout to map special characters to modifier keys:
 <br><img width="375" height="530" alt="Screenshot 2026-09-21 185914" src="https://github.com/user-attachments/assets/ba9d31f5-8f9a-45db-bc74-fb94d2584b7a" />
 
-**Version 2.5.1** | Built by Li Fan, 2026
+**Version 2.6** | Built by Li Fan, 2026
 
 📥 **Download**: Grab `KeyRemapper.exe` from the
 [latest release](https://github.com/linkmodo/key_remapper/releases/latest) — a single file, no
@@ -31,6 +31,29 @@ Runs as a normal user. Administrator rights are only needed if you want it to af
 windows that themselves run elevated (some games, Task Manager, etc.).
 
 > *Created out of frustration at being unable to disable or remap keys within a particular game.*
+
+## ✨ What's New in Version 2.6
+
+- **Numpad stays a numpad while Shift is held** — with NumLock on, Windows turns
+  Shift+Numpad into arrow keys and briefly releases Shift, which breaks numpad bindings
+  and drops a held sprint or crouch. A new **Settings → Gaming** option stops both.
+  Off by default. See [Numpad + Shift in games](#-numpad--shift-in-games)
+- **Start works for every kind of setup** — the remapper used to refuse to start unless at
+  least one mapping or block existed, which locked out Copilot-key-only setups; it now
+  starts whenever there is anything for it to do
+- **Nothing replaces your setup without a backup** — Reset and Load now save a timestamped
+  copy of your current setup first (the last 10 are kept in
+  `%APPDATA%\KeyRemapper\backups`)
+- **Save Config makes a real copy** — it suggests your Documents folder and refuses to save over
+  the live settings file, which Reset and every change overwrite. Previously its default
+  *was* that file, so a "backup" made with the defaults could be wiped by the next Reset
+- **Load Config sticks** — a loaded setup now becomes the live one and is still there after a
+  restart, and the Settings tab updates to match (before, the next Apply could quietly put the
+  old settings back). Files that aren't a Key Remapper setup are refused without touching
+  anything
+- **Closing the window can be cancelled** — the "keep running in the tray?" prompt now has
+  a Cancel button, and its X works; before, the X was greyed out and there was no way back
+- **166 unit tests**, up from 135, plus a live check against real Windows input
 
 ## ✨ What's New in Version 2.5.1
 
@@ -224,6 +247,7 @@ Fair. You have three options, in order of paranoia:
 
    | Release | SHA-256 |
    |---------|---------|
+   | v2.6.0 | `e0daa4a3baf758e2f374a8922347d546557b2b4046cd4d0e361f9a94f5f577ea` |
    | v2.5.1 | `32f4f100586954ee5db25c2165b7d7b380eb7a9ce799d9f1f89061524287bf1e` |
    | v2.5.0 | `e8f3a50413c93744e3cc36e0f9957dc637adb942d1a468cdd1b1044ad94b2f55` |
    | v2.4.0 | `2cb3995c8c40374c681e4a76bd0914e9841721cf86af7ca76ddf64d450a0342b` |
@@ -417,6 +441,47 @@ Keyboards send codes this app has no friendly name for, especially under Fn. �
 writes those as `vk0x5D` (or `vk93` — decimal works too) and they can be used anywhere a
 key name can. Nothing your keyboard sends is off-limits.
 
+### 🎮 Numpad + Shift in games
+
+**The problem.** With NumLock on, Windows turns Shift+Numpad into navigation keys —
+Numpad 8 becomes Up, Numpad 7 becomes Home, and so on. To do it, Windows *fakes a Shift
+release*, sends the arrow key, then fakes the Shift press again. Recorded from a live hook:
+
+```
+down  LSHIFT  scan 0x02A     you press Shift
+up    LSHIFT  scan 0x22A     <- Windows fakes a release
+down  UP      scan 0x048     <- Numpad 8 arrives as the Up arrow
+up    UP      scan 0x048
+down  LSHIFT  scan 0x02A     <- Windows presses Shift again
+```
+
+In a game, the numpad binding never fires, and anything bound to *holding* Shift (sprint,
+crouch, walk) drops for an instant on every numpad press.
+
+**The fix.** Settings → Gaming → *Keep numpad keys as numbers while Shift is held*.
+The fake Shift events carry scan code `0x22A` (left) or `0x236` (right), which a real
+Shift key never sends, so they are swallowed; the arrow key that follows is replaced by
+the numpad digit it came from. The game receives:
+
+```
+down  LSHIFT        down  NUMPAD8        up  NUMPAD8        up  LSHIFT
+```
+
+It is exact rather than a guess:
+
+- **Real arrow keys are never touched** — the arrow cluster sends the *extended* flag and
+  the numpad never does, and Windows fakes nothing for real arrow keys anyway.
+- **NumLock off is left alone** — Windows only fakes the Shift release with NumLock on,
+  so Shift+numpad arrows still select text when you want navigation.
+- Your rules see the real digit: a rule on `shift+num8` fires as you would expect.
+- Off by default, because outside games Windows' behaviour is what people expect.
+
+> ⚠️ **Admin rights and anti-cheat.** Most games run as administrator, and Windows only
+> lets a program change a game's keyboard input when it runs with at least the same
+> rights — so for most games, run Key Remapper **as administrator** (right-click →
+> *Run as administrator*). The Settings tab shows whether it currently is. Some games and
+> anti-cheat systems block keyboard hooks altogether; there, this option cannot work.
+
 ### Per-app profiles
 
 Leave **Only in this app** empty and a rule applies everywhere. Fill in an executable name
@@ -540,7 +605,7 @@ Everything is saved to `%APPDATA%\KeyRemapper\key_remap_config.json`:
 
 ```json
 {
-    "version": 6,
+    "version": 7,
     "mappings": [
         {
             "source": "CAPSLOCK",
@@ -595,13 +660,15 @@ Everything is saved to `%APPDATA%\KeyRemapper\key_remap_config.json`:
         "run_at_startup": false,
         "start_minimized": false,
         "start_on_launch": false,
-        "type_text_enabled": true
+        "type_text_enabled": true,
+        "numpad_ignores_shift": false
     }
 }
 ```
 
 A mapping's `action` is `keys` (send `target`), `text` (type `value` literally), or
-`launch` / `url` (open `value`). `type_text_enabled` is the Settings switch for text rules.
+`launch` / `url` (open `value`). `type_text_enabled` is the Settings switch for text rules, and `numpad_ignores_shift`
+the Gaming option for Shift+Numpad.
 Copilot `mode` is one of `disable`, `keys`, `launch`, `url` or `passthrough`.
 Older config files load unchanged — missing fields and sections fall back to defaults.
 
@@ -611,10 +678,11 @@ Older config files load unchanged — missing fields and sections fall back to d
 python -m unittest discover -s tests
 ```
 
-135 tests drive the rule engine directly (no real hooks, no keyboard input needed), covering
+166 tests drive the rule engine directly (no real hooks, no keyboard input needed), covering
 remaps, blocks, per-app scoping, dual-role keys, the pause hotkey, the Copilot chord, the mouse
 hook, app-launching mappings, layout-independent text (including the exact `SendInput`
-events it produces), raw key codes, the key reference, the single-instance guard and config
+events it produces), raw key codes, the key reference, Shift+Numpad correction (replaying event sequences
+recorded from Windows), the single-instance guard and config
 round-tripping — including that configs written by earlier versions still load.
 
 ## Troubleshooting
@@ -633,6 +701,14 @@ trigger. The [SmartScreen section](#-windows-smartscreen-warning) documents exac
 does with your keystrokes and where it writes. Building from source avoids the packed-executable
 heuristic entirely.
 
+### Shift+Numpad still turns into arrow keys in my game
+
+1. Check **Settings → Gaming** is ticked, you clicked **✔ Apply**, and the remapper is
+   started (▶ Start)
+2. Run Key Remapper **as administrator** — the Settings tab says whether it is
+3. NumLock must be on; with NumLock off the numpad *is* the arrow keys, by design
+4. If it still fails, the game's anti-cheat is probably blocking keyboard hooks
+
 ### Remapper doesn't work in games
 
 1. If the game runs elevated, run the remapper as administrator too
@@ -644,6 +720,14 @@ Fn is not a modifier this app can see — your keyboard handles it internally an
 tells Windows. That is normal and it is the majority case. Detect the **combination**
 rather than the Fn key: 🎯 Detect, then hold Fn and tap F12, and whatever your keyboard
 actually sends is recorded and mappable. [Full explanation](#-the-fn-key).
+
+### I loaded my saved config and my rules were gone
+
+Before v2.6, **💾 Save Config** suggested the very file Key Remapper saves to automatically. Saving
+there and then using **Reset everything to defaults** wiped the "backup" along with everything else.
+From v2.6, Reset and Load save a backup first — look in `%APPDATA%\KeyRemapper\backups` and load the
+newest one from before your reset. If you have no backup, the log (`key_remapper.log` in the same
+folder) lists every rule each time the app loads, so a setup can be rebuilt from it by hand.
 
 ### The app opens and immediately disappears
 
@@ -682,6 +766,8 @@ it is hidden reopens the window rather than starting a second copy.
 - The hook is installed and pumped on a dedicated thread, so UI work can never stall input
 - Injects replacement keys using `SendInput` API, as virtual keys — so the active layout
   decides the character, exactly as for a physical key
+- The Gaming numpad option swallows Windows' synthetic Shift events (scan codes `0x22A` /
+  `0x236`) and re-sends non-extended navigation keys as the numpad digits they came from
 - *Type text* rules instead send `KEYEVENTF_UNICODE` packets (`wVk = 0`, the character in
   `wScan`), which bypass the layout entirely; the whole string goes in one `SendInput` call
 - Marks injected events (`dwExtraInfo`) to prevent infinite loops

@@ -13,6 +13,7 @@ Requirements:
 import customtkinter as ctk
 from tkinter import messagebox, filedialog
 import threading
+import time
 import json
 import queue
 import webbrowser
@@ -67,6 +68,16 @@ def _window_scaling(widget) -> float:
         return ctk.ScalingTracker.get_window_scaling(widget) or 1.0
     except Exception:
         return 1.0
+
+
+def _backup_folder() -> Path:
+    """Where Save/Load dialogs start: Documents, never the live settings folder."""
+    documents = Path.home() / "Documents"
+    return documents if documents.is_dir() else Path.home()
+
+
+def _same_file(a, b) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
 class AutoHideScrollableFrame(ctk.CTkScrollableFrame):
@@ -1245,10 +1256,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Startup behaviour
-        if self.remapper.settings.start_on_launch and (
-            self.remapper.mappings or self.remapper.blocked_keys
-            or self.remapper.copilot.enabled
-        ):
+        if self.remapper.settings.start_on_launch and self.remapper.has_work():
             if self.remapper.start():
                 self._update_status(True)
 
@@ -1935,6 +1943,43 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             variable=self.type_text_var
         ).pack(anchor="w", padx=14, pady=(4, 14))
 
+        # --- Gaming: numpad + Shift ---
+        ctk.CTkLabel(
+            tab, text="Gaming", font=ctk.CTkFont(size=13, weight="bold")
+        ).pack(anchor="w", padx=10)
+        ctk.CTkLabel(
+            tab,
+            text="With NumLock on, Windows turns Shift+Numpad into arrow keys and briefly\n"
+                 "lets go of Shift \u2014 so a numpad binding misfires and a held Shift (sprint,\n"
+                 "crouch) drops for an instant. This keeps the numpad sending numbers and\n"
+                 "Shift held. Real arrow keys, and the numpad with NumLock off, are unaffected.",
+            font=ctk.CTkFont(size=11), text_color="gray", justify="left"
+        ).pack(anchor="w", padx=10, pady=(0, 4))
+
+        self.numpad_var = ctk.BooleanVar(value=settings.numpad_ignores_shift)
+        ctk.CTkCheckBox(
+            tab, text="Keep numpad keys as numbers while Shift is held",
+            variable=self.numpad_var, command=self._on_numpad_toggled
+        ).pack(anchor="w", padx=14, pady=4)
+
+        # Always visible, not just in the popup: the limits are the first thing
+        # to check when it seems not to work in a particular game
+        admin = check_admin()
+        ctk.CTkLabel(
+            tab,
+            text="\u26a0 Most games run as administrator, and Windows only lets Key Remapper\n"
+                 "change their input when it runs as administrator too. Some games and\n"
+                 "anti-cheat systems block it regardless.",
+            font=ctk.CTkFont(size=11), text_color="#f39c12", justify="left"
+        ).pack(anchor="w", padx=14, pady=(2, 2))
+        ctk.CTkLabel(
+            tab,
+            text=("\u2714 Key Remapper is running as administrator." if admin else
+                  "\u2716 Key Remapper is NOT running as administrator right now."),
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#27ae60" if admin else "#e74c3c", justify="left"
+        ).pack(anchor="w", padx=14, pady=(0, 14))
+
         # --- Apply ---
         ctk.CTkButton(
             tab, text="✔ Apply", command=self._apply_settings, width=120,
@@ -1968,6 +2013,26 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             font=ctk.CTkFont(size=11), text_color="gray"
         ).pack(anchor="w", padx=10, pady=(10, 6))
 
+    def _on_numpad_toggled(self):
+        """Warn when the numpad option is switched on - before anyone relies on it."""
+        if not self.numpad_var.get():
+            return
+        admin = check_admin()
+        messagebox.showwarning(
+            "Before you rely on this in a game",
+            "This works by intercepting the keyboard, and Windows only allows that "
+            "for a game when Key Remapper has at least the same permissions.\n\n"
+            "\u2022 Most games run as administrator, so Key Remapper must run as "
+            "administrator too: close it, right-click KeyRemapper.exe and choose "
+            "\u201cRun as administrator\u201d.\n\n"
+            "\u2022 Some games and anti-cheat systems block keyboard hooks entirely. "
+            "There, this option cannot work, whatever the permissions.\n\n"
+            + ("Key Remapper is running as administrator right now."
+               if admin else
+               "Key Remapper is NOT running as administrator right now.")
+            + "\n\nClick \u2714 Apply to turn it on, then \u25b6 Start."
+        )
+
     def _detect_into_entry(self, entry, title):
         dialog = KeyCaptureDialog(self, title)
         self.wait_window(dialog)
@@ -1987,6 +2052,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             start_minimized=bool(self.minimized_var.get()),
             start_on_launch=bool(self.autostart_var.get()),
             type_text_enabled=bool(self.type_text_var.get()),
+            numpad_ignores_shift=bool(self.numpad_var.get()),
         )
 
         if not self.remapper.apply_settings(settings):
@@ -2010,6 +2076,25 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             text_color="#27ae60"
         )
 
+    def _refresh_settings_widgets(self):
+        """
+        Make the Settings tab show what the remapper actually has.
+
+        Needed after Reset and after Load: otherwise the tab keeps showing the
+        old values, and the next Apply quietly writes them back.
+        """
+        settings = self.remapper.settings
+        self.hotkey_entry.delete(0, 'end')
+        if settings.toggle_hotkey:
+            self.hotkey_entry.insert(0, settings.toggle_hotkey)
+        self.timeout_slider.set(settings.tap_timeout_ms)
+        self._on_timeout_slide(settings.tap_timeout_ms)
+        self.startup_var.set(is_run_at_startup())      # lives in the registry
+        self.minimized_var.set(settings.start_minimized)
+        self.autostart_var.set(settings.start_on_launch)
+        self.type_text_var.set(settings.type_text_enabled)
+        self.numpad_var.set(settings.numpad_ignores_shift)
+
     def _reset_all(self):
         """Wipe every rule and setting after confirming"""
         counts = (f"{len(self.remapper.mappings)} mapping(s), "
@@ -2019,7 +2104,16 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             "Reset everything?",
             f"This deletes {counts}, clears the Copilot key action and puts every\n"
             "setting back to its default.\n\n"
-            "This cannot be undone. Continue?",
+            "A backup of your current setup is saved first, so you can bring it back\n"
+            "with \U0001f4c2 Load Config. Continue?",
+            icon="warning"
+        ):
+            return
+
+        backup = self.remapper.backup_config("reset")
+        if backup is None and not messagebox.askyesno(
+            "Backup failed",
+            "Your current setup could not be backed up.\n\nReset anyway? It cannot be undone.",
             icon="warning"
         ):
             return
@@ -2033,26 +2127,20 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
 
         self.remapper.save_config()
 
-        # Rebuild the settings widgets from the fresh defaults
-        defaults = self.remapper.settings
-        self.hotkey_entry.delete(0, 'end')
-        self.timeout_slider.set(defaults.tap_timeout_ms)
-        self._on_timeout_slide(defaults.tap_timeout_ms)
-        self.startup_var.set(False)
-        self.minimized_var.set(defaults.start_minimized)
-        self.autostart_var.set(defaults.start_on_launch)
-        self.type_text_var.set(defaults.type_text_enabled)
+        self._refresh_settings_widgets()
         self.settings_status_label.configure(text="Everything reset to defaults.", text_color="gray")
 
         self._refresh_lists()
         self._update_status(self.remapper.running)
 
-        if was_running:
-            messagebox.showinfo(
-                "Reset",
-                "Everything is back to defaults.\n\nThe remapper was stopped because there "
-                "are no rules left to apply."
-            )
+        messagebox.showinfo(
+            "Reset",
+            "Everything is back to defaults."
+            + ("\n\nThe remapper was stopped because there are no rules left to apply."
+               if was_running else "")
+            + (f"\n\nYour previous setup was backed up to:\n{backup}\n\n"
+               "Use \U0001f4c2 Load Config to bring it back." if backup else "")
+        )
 
     def _on_pause_changed(self, paused: bool):
         """Called from the hook thread when the pause hotkey is used"""
@@ -2270,8 +2358,12 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
     
     def _start_remapper(self):
         """Start the remapper"""
-        if not self.remapper.mappings and not self.remapper.blocked_keys:
-            messagebox.showwarning("Warning", "No mappings or blocked keys configured.")
+        if not self.remapper.has_work():
+            messagebox.showwarning(
+                "Nothing to do yet",
+                "Add a mapping or a blocked key, set up the Copilot key, or turn on a "
+                "Gaming option in Settings first."
+            )
             return
         
         if self.remapper.start():
@@ -2314,19 +2406,28 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
                 pass
     
     def _save_config(self):
-        """Save configuration with file dialog"""
-        default_dir = CONFIG_DIR
-
+        """Save a copy of the setup somewhere of the user's choosing."""
         filepath = filedialog.asksaveasfilename(
-            title="Save Configuration",
-            initialdir=default_dir,
-            initialfile="key_remap_config.json",
+            title="Save a copy of your setup",
+            initialdir=_backup_folder(),
+            initialfile=time.strftime("Key Remapper backup %Y-%m-%d.json"),
             defaultextension=".json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
         )
-        
+
         if filepath:
             filepath = Path(filepath)
+            # Saving onto the live file makes a "backup" that Reset - and every
+            # change - overwrites. It is exactly how a setup gets lost.
+            if _same_file(filepath, CONFIG_FILE):
+                messagebox.showwarning(
+                    "That isn't a backup",
+                    "That is the file Key Remapper already saves to automatically. "
+                    "Every change, and Reset, overwrites it - so a copy there would "
+                    "not protect anything.\n\n"
+                    "Choose another folder or name, such as your Documents folder."
+                )
+                return
             if self.remapper.save_config(filepath):
                 self.config_label.configure(text=f"Config: {filepath.name}")
                 messagebox.showinfo("Saved", f"Configuration saved to:\n{filepath}")
@@ -2334,24 +2435,42 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
                 messagebox.showerror("Error", "Failed to save configuration.")
     
     def _load_config(self):
-        """Load configuration with file dialog"""
-        default_dir = CONFIG_DIR
-
+        """Replace the current setup with a saved copy."""
         filepath = filedialog.askopenfilename(
-            title="Load Configuration",
-            initialdir=default_dir,
+            title="Load a saved setup",
+            initialdir=_backup_folder(),
             defaultextension=".json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
         )
-        
-        if filepath:
-            filepath = Path(filepath)
-            if self.remapper.load_config(filepath):
-                self._refresh_lists()
-                self.config_label.configure(text=f"Config: {filepath.name}")
-                messagebox.showinfo("Loaded", f"Configuration loaded from:\n{filepath}")
-            else:
-                messagebox.showerror("Error", "Failed to load configuration.")
+        if not filepath:
+            return
+        filepath = Path(filepath)
+
+        # Loading replaces every rule, so keep what is there now - unless the
+        # file chosen *is* the live setup, which would be a pointless copy
+        backup = None
+        if not _same_file(filepath, CONFIG_FILE):
+            backup = self.remapper.backup_config("load")
+
+        if not self.remapper.load_config(filepath):
+            messagebox.showerror(
+                "Couldn't load that file",
+                f"{filepath.name} isn't a Key Remapper setup, or it is damaged.\n\n"
+                "Nothing was changed."
+            )
+            return
+
+        # Make it the live setup, so it is still there after a restart
+        self.remapper.save_config()
+        self._refresh_lists()
+        self._refresh_settings_widgets()
+        self.config_label.configure(text=f"Config: {filepath.name}")
+        messagebox.showinfo(
+            "Loaded",
+            f"Loaded {len(self.remapper.mappings)} mapping(s) and "
+            f"{len(self.remapper.blocked_keys)} blocked key(s) from:\n{filepath}"
+            + (f"\n\nYour previous setup was backed up to:\n{backup}" if backup else "")
+        )
     
     def _show_available_keys(self):
         """Open the key reference (or bring the open one forward)."""
@@ -2431,7 +2550,8 @@ THE FOUR TABS
   Key Mappings  turn keys into other keys or actions
   Blocked Keys  disable keys outright
   Copilot Key   repurpose the dedicated Copilot key
-  Settings      pause hotkey, startup, typing, reset
+  Settings      pause hotkey, startup, typing, gaming,
+                reset
 
 KEY MAPPINGS
 ────────────
@@ -2498,6 +2618,24 @@ The "Copilot Key" tab lets you:
   • Give back the key it replaced: Right Alt, Windows,
     Menu or Right Ctrl — one click each
   • Disable it, send other keys, or launch something
+
+NUMPAD + SHIFT IN GAMES
+───────────────────────
+With NumLock on, Windows turns Shift+Numpad into arrow
+keys - and to do it, it briefly lets go of Shift. In a
+game that means a numpad binding misfires and a held
+Shift (sprint, crouch) drops for an instant.
+
+Settings → Gaming → "Keep numpad keys as numbers while
+Shift is held" stops both. Off by default: outside games,
+Shift+Numpad selecting text is what people expect. Real
+arrow keys, and the numpad with NumLock off, are never
+touched.
+
+⚠ Most games run as administrator, so Key Remapper has
+to be run as administrator too (right-click → Run as
+administrator). Some games and anti-cheat systems block
+keyboard hooks entirely, and there this cannot work.
 
 PER-APP PROFILES
 ────────────────
@@ -2575,10 +2713,23 @@ SUPPORTED KEYS
   • Combinations: ctrl+a, win+shift+f23, etc.
 See "📋 Show Keys" for the full list.
 
-STARTING OVER
-─────────────
-Settings tab → "Reset everything to defaults" clears
-every rule and restores the original settings.
+SAVING, LOADING AND STARTING OVER
+────────────────────────────────
+Changes save themselves automatically. "💾 Save Config"
+is for keeping a COPY - it suggests your Documents
+folder, and won't save over the automatic file, because
+a copy there wouldn't protect anything.
+
+"📂 Load Config" replaces your current setup with a saved
+copy and keeps it after a restart.
+
+Settings → "Reset everything to defaults" clears every
+rule and setting.
+
+Reset and Load both save a backup of your current setup
+first, so neither can lose it. The last 10 backups are
+kept in the "backups" folder next to your settings - use
+Load Config to bring one back.
 
 IMPORTANT NOTES
 ───────────────
@@ -2650,22 +2801,32 @@ welcome to buy me a coffee - the button is below.
     
     def _on_close(self):
         """Handle window close"""
+        # Every prompt here has a Cancel: a plain Yes/No box makes Windows grey
+        # out the title bar's X, leaving no way to back out of closing. With a
+        # Cancel button, X and Esc both work and both mean "never mind".
         if TRAY_AVAILABLE and self.remapper.running:
-            # Minimize to tray instead of closing
-            if messagebox.askyesno(
-                "Minimize to Tray?", 
-                "Remapper is running. Minimize to system tray?\n\n"
-                "Click 'No' to stop and exit completely."
-            ):
+            choice = messagebox.askyesnocancel(
+                "Keep running in the tray?",
+                "Key Remapper is running.\n\n"
+                "Yes \u2014 keep it running in the system tray\n"
+                "No \u2014 stop it and quit\n"
+                "Cancel \u2014 go back to the window"
+            )
+            if choice is None:
+                return
+            if choice:
                 self._minimize_to_tray()
                 return
-            else:
-                self.remapper.stop()
+            self.remapper.stop()
         elif self.remapper.running:
-            if messagebox.askyesno("Confirm Exit", "Remapper is still running. Stop and exit?"):
-                self.remapper.stop()
-            else:
+            if not messagebox.askokcancel(
+                "Stop and quit?",
+                "Key Remapper is running. Closing the window stops it.\n\n"
+                "OK \u2014 stop it and quit\n"
+                "Cancel \u2014 go back to the window"
+            ):
                 return
+            self.remapper.stop()
         
         if hasattr(self, 'tray_icon') and self.tray_icon:
             self.tray_icon.stop()

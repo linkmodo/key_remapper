@@ -24,8 +24,7 @@ Ignore keyboard layout to map special characters to modifier keys:
 
 📥 **Download**: Grab `KeyRemapper.exe` from the
 [latest release](https://github.com/linkmodo/key_remapper/releases/latest) — a single file, no
-Python needed. Windows will show a SmartScreen warning the first time —
-[here's why, and what to click](#-windows-smartscreen-warning).
+Python needed. Windows will show a SmartScreen warning the first time.
 
 Runs as a normal user. Administrator rights are only needed if you want it to affect
 windows that themselves run elevated (some games, Task Manager, etc.).

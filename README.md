@@ -18,7 +18,7 @@ Option to auto-start at launch for uninterruped remapping and key blocking:
 
 <img width="581" height="599" alt="image" src="https://github.com/user-attachments/assets/34bb324d-f407-4ece-9f4e-0d6b9ed7bd9c" />
 
-**Version 2.5** | Built by Li Fan, 2026
+**Version 2.5.1** | Built by Li Fan, 2026
 
 📥 **Download**: Grab `KeyRemapper.exe` from the
 [latest release](https://github.com/linkmodo/key_remapper/releases/latest) — a single file, no
@@ -29,6 +29,16 @@ Runs as a normal user. Administrator rights are only needed if you want it to af
 windows that themselves run elevated (some games, Task Manager, etc.).
 
 > *Created out of frustration at being unable to disable or remap keys within a particular game.*
+
+## ✨ What's New in Version 2.5.1
+
+- **A proper key reference** — 📋 Show Keys now opens every key name grouped by category
+  (letters, modifiers, navigation, punctuation, numpad, media, browser, mouse…) with a
+  plain-English description, the alternative names each key accepts, and a search box
+- **⌨ beside every key field** in Add Mapping and Block Key opens the same list, and
+  clicking keys fills the field for you: click `ctrl`, then `s`, and the field reads
+  `ctrl+s`. *Remove last* and *Clear* undo mistakes; mouse buttons are greyed out where
+  they can't be used
 
 ## ✨ What's New in Version 2.5
 
@@ -212,6 +222,7 @@ Fair. You have three options, in order of paranoia:
 
    | Release | SHA-256 |
    |---------|---------|
+   | v2.5.1 | `32f4f100586954ee5db25c2165b7d7b380eb7a9ce799d9f1f89061524287bf1e` |
    | v2.5.0 | `e8f3a50413c93744e3cc36e0f9957dc637adb942d1a468cdd1b1044ad94b2f55` |
    | v2.4.0 | `2cb3995c8c40374c681e4a76bd0914e9841721cf86af7ca76ddf64d450a0342b` |
    | v2.3.0 | `883f407b5b61655076cc8e57d2bb50c1d2f74ba9e837bf16b2dfc09e34e4eff9` |
@@ -473,7 +484,8 @@ Keys can be specified as:
 - Single keys: `a`, `f1`, `escape`, `space`
 - Combinations: `ctrl+a`, `shift+f1`, `ctrl+shift+escape`, `win+shift+f23`
 
-**💡 Tip**: Use the 🎯 Detect buttons in the GUI to automatically capture key presses!
+**💡 Tip**: Use the 🎯 Detect buttons in the GUI to automatically capture key presses, or
+click **⌨** beside any key field to pick names from a searchable list.
 
 #### Available Key Names
 
@@ -597,10 +609,10 @@ Older config files load unchanged — missing fields and sections fall back to d
 python -m unittest discover -s tests
 ```
 
-127 tests drive the rule engine directly (no real hooks, no keyboard input needed), covering
+135 tests drive the rule engine directly (no real hooks, no keyboard input needed), covering
 remaps, blocks, per-app scoping, dual-role keys, the pause hotkey, the Copilot chord, the mouse
 hook, app-launching mappings, layout-independent text (including the exact `SendInput`
-events it produces), raw key codes, the single-instance guard and config
+events it produces), raw key codes, the key reference, the single-instance guard and config
 round-tripping — including that configs written by earlier versions still load.
 
 ## Troubleshooting

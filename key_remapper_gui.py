@@ -25,7 +25,7 @@ import os
 from key_remapper import (
     KeyRemapper, CONFIG_FILE, CONFIG_DIR, KEY_NAME_TO_VK, VK_TO_KEY_NAME,
     CopilotConfig, DEFAULT_COPILOT_KEY, Settings,
-    COMMON_APPS, COMMON_TARGETS, vk_name, SingleInstance,
+    COMMON_APPS, COMMON_TARGETS, vk_name, SingleInstance, key_reference,
     is_run_at_startup, set_run_at_startup, check_admin, logger,
     __version__, PROJECT_URL, DONATE_URL
 )
@@ -398,6 +398,263 @@ class KeyCaptureDialog(UiQueueMixin, ctk.CTkToplevel):
             self.destroy()
 
 
+class KeyReferenceWindow(ctk.CTkToplevel):
+    """
+    Every key name, grouped, searchable and clickable.
+
+    Browse mode (no ``entry``): clicking a key copies its name.
+    Pick mode: clicking keys builds a combination straight into ``entry`` -
+    ctrl, then s, gives "ctrl+s" - with Remove last / Clear / Done.
+    """
+
+    # Short names (a, 7, f12) get compact chips so letters and digits don't
+    # push the more interesting groups off the first screen
+    COLUMNS, CHIP_WIDTH = 5, 112
+    COMPACT_COLUMNS, COMPACT_WIDTH = 10, 52
+
+    def __init__(self, parent, entry=None, field_name: str = "", allow_source_only: bool = True):
+        super().__init__(parent)
+        self.parent = parent
+        self.entry = entry
+        self.picking = entry is not None
+        self.allow_source_only = allow_source_only
+        self._filter_id = None
+
+        self.title(f"Choose keys — {field_name}" if self.picking else "Available Keys")
+        height = min(680, max(420, int(parent.winfo_screenheight() / _window_scaling(parent)) - 110))
+        self.geometry(f"680x{height}")
+        self.minsize(560, 380)
+        self.transient(parent)
+
+        self.update_idletasks()
+        x = parent.winfo_rootx() + 40
+        y = max(0, parent.winfo_rooty() - 20)
+        self.geometry(f"+{x}+{y}")
+
+        # --- header --------------------------------------------------------
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=14, pady=(12, 4))
+
+        if self.picking:
+            ctk.CTkLabel(
+                header, text=f"Click keys to build the {field_name.lower()}",
+                font=ctk.CTkFont(size=15, weight="bold")
+            ).pack(anchor="w")
+
+            build = ctk.CTkFrame(self, fg_color="#2b2b2b", corner_radius=6)
+            build.pack(fill="x", padx=14, pady=(4, 6))
+            ctk.CTkLabel(build, text="Current:", text_color="gray").pack(side="left", padx=(12, 6), pady=8)
+            self.current_label = ctk.CTkLabel(
+                build, text="", font=ctk.CTkFont(family="Consolas", size=14, weight="bold"),
+                text_color="#5dade2"
+            )
+            self.current_label.pack(side="left", pady=8)
+            ctk.CTkButton(
+                build, text="Done", width=70, command=self._close,
+                fg_color=START_COLOR, hover_color=START_HOVER
+            ).pack(side="right", padx=(4, 10), pady=8)
+            ctk.CTkButton(
+                build, text="Clear", width=64, command=self._clear,
+                fg_color=GRAY_BUTTON, hover_color=GRAY_BUTTON_HOVER
+            ).pack(side="right", padx=4, pady=8)
+            ctk.CTkButton(
+                build, text="⌫ Remove last", width=110, command=self._remove_last,
+                fg_color=GRAY_BUTTON, hover_color=GRAY_BUTTON_HOVER
+            ).pack(side="right", padx=4, pady=8)
+            self._refresh_current()
+        else:
+            ctk.CTkLabel(
+                header, text="Available keys", font=ctk.CTkFont(size=15, weight="bold")
+            ).pack(anchor="w")
+            ctk.CTkLabel(
+                header, text="Type these names in any key field. Click a key to copy its name.",
+                font=ctk.CTkFont(size=11), text_color="gray"
+            ).pack(anchor="w")
+
+        self.search_entry = ctk.CTkEntry(
+            self, placeholder_text="Search — e.g. volume, arrow, f1, bracket"
+        )
+        self.search_entry.pack(fill="x", padx=14, pady=(4, 6))
+        self.search_entry.bind("<KeyRelease>", self._schedule_filter)
+
+        # --- what the pointer is over ------------------------------------
+        # Packed before the body so it keeps its place at the bottom
+        self.info_label = ctk.CTkLabel(
+            self, text="", anchor="w", justify="left",
+            font=ctk.CTkFont(size=12), text_color="#aeb6bf"
+        )
+        self.info_label.pack(side="bottom", fill="x", padx=16, pady=(4, 10))
+        self._show_default_info()
+
+        # --- the keys -------------------------------------------------------
+        self.body = AutoHideScrollableFrame(self, fg_color="transparent")
+        self.body.pack(fill="both", expand=True, padx=8)
+
+        self.groups = []   # (frame, [(chip, key, haystack)])
+        for group in key_reference():
+            frame = ctk.CTkFrame(self.body, fg_color="transparent")
+            frame.pack(fill="x", pady=(6, 2))
+
+            ctk.CTkLabel(
+                frame, text=group["title"], font=ctk.CTkFont(size=13, weight="bold")
+            ).pack(anchor="w", padx=6)
+            if group["note"]:
+                ctk.CTkLabel(
+                    frame, text=group["note"], font=ctk.CTkFont(size=11), text_color="gray",
+                    wraplength=600, justify="left"
+                ).pack(anchor="w", padx=6)
+
+            grid = ctk.CTkFrame(frame, fg_color="transparent")
+            grid.pack(anchor="w", padx=2, pady=(4, 2))
+
+            compact = all(len(key["name"]) <= 3 for key in group["keys"])
+            width = self.COMPACT_WIDTH if compact else self.CHIP_WIDTH
+            columns = self.COMPACT_COLUMNS if compact else self.COLUMNS
+
+            chips = []
+            for key in group["keys"]:
+                usable = key["target"] or self.allow_source_only or not self.picking
+                chip = ctk.CTkButton(
+                    grid, text=key["name"], width=width, height=28,
+                    font=ctk.CTkFont(family="Consolas", size=12),
+                    fg_color="#34495e" if usable else "#2c2f33",
+                    hover_color=GRAY_BUTTON_HOVER,
+                    text_color_disabled="#6b7178",
+                    state="normal" if usable else "disabled",
+                    command=lambda k=key: self._on_key(k),
+                )
+                chip.bind("<Enter>", lambda e, k=key, u=usable: self._show_info(k, u), add="+")
+                haystack = " ".join([key["name"], key["label"]] + key["aliases"]).lower()
+                chips.append((chip, key, haystack))
+            self.groups.append((frame, chips, group["title"].lower(), columns))
+            self._layout(chips, columns)
+
+        # Everything that isn't a single named key
+        extras = ctk.CTkFrame(self.body, fg_color="#2b2b2b", corner_radius=6)
+        extras.pack(fill="x", padx=6, pady=(12, 8))
+        self.extras = extras
+        ctk.CTkLabel(
+            extras,
+            text="Combinations — join names with +, in any order:  ctrl+shift+s,  win+d,  alt+f4\n"
+                 "Raw codes — any key without a name, as 🎯 Detect writes it:  vk0x5D  or  vk93\n"
+                 "Fn — most keyboards never send Fn to Windows, so it has no name. Detect the "
+                 "whole combination (e.g. Fn+F12) instead.",
+            font=ctk.CTkFont(size=11), text_color="#aeb6bf", justify="left",
+            wraplength=610, anchor="w"
+        ).pack(anchor="w", padx=12, pady=10)
+
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.bind("<Escape>", lambda e: self._close())
+
+        if self.picking:
+            # The dialog underneath is modal, so this window must take the grab
+            # while it is open and hand it back afterwards
+            self.after(50, self._take_grab)
+        self.search_entry.focus_set()
+
+    # --- layout / search --------------------------------------------------
+
+    def _layout(self, chips, columns):
+        for index, (chip, _, _) in enumerate(chips):
+            chip.grid(row=index // columns, column=index % columns, padx=3, pady=3)
+
+    def _schedule_filter(self, _event=None):
+        if self._filter_id:
+            self.after_cancel(self._filter_id)
+        self._filter_id = self.after(120, self._apply_filter)
+
+    def _apply_filter(self):
+        self._filter_id = None
+        query = self.search_entry.get().strip().lower()
+        for frame, chips, title, columns in self.groups:
+            # Keys that match by name, label or alias; failing that, a query
+            # naming the group ("numpad", "browser") shows the whole group
+            shown = [c for c in chips if not query or query in c[2]]
+            if not shown and query and query in title:
+                shown = chips
+            for chip, _, _ in chips:
+                chip.grid_remove()
+            self._layout(shown, columns)
+            if shown:
+                frame.pack(fill="x", pady=(6, 2), before=self.extras)
+            else:
+                frame.pack_forget()
+        self.after(60, self.body._refresh_scrollbar)
+
+    # --- the info line ---------------------------------------------------
+
+    def _show_default_info(self):
+        self.info_label.configure(
+            text="Point at a key to see what it is." + (
+                "" if self.picking else "  Copied names can be pasted into any key field."
+            )
+        )
+
+    def _show_info(self, key, usable=True):
+        text = f"{key['name']}  —  {key['label']}"
+        if key["aliases"]:
+            text += "      also accepted: " + ", ".join(key["aliases"])
+        if not usable:
+            text += "      (mouse buttons can only be a source)"
+        self.info_label.configure(text=text)
+
+    # --- clicking keys -------------------------------------------------
+
+    def _on_key(self, key):
+        name = key["name"]
+        if not self.picking:
+            self.clipboard_clear()
+            self.clipboard_append(name)
+            self.info_label.configure(text=f"Copied “{name}” — paste it into any key field.")
+            return
+
+        parts = self._parts()
+        if name not in parts:
+            parts.append(name)
+        self._write(parts)
+
+    def _parts(self):
+        return [part.strip() for part in self.entry.get().split('+') if part.strip()]
+
+    def _write(self, parts):
+        self.entry.delete(0, 'end')
+        self.entry.insert(0, '+'.join(parts))
+        self._refresh_current()
+
+    def _remove_last(self):
+        self._write(self._parts()[:-1])
+
+    def _clear(self):
+        self._write([])
+
+    def _refresh_current(self):
+        value = self.entry.get().strip()
+        self.current_label.configure(text=value or "(nothing yet)")
+
+    # --- window lifetime -----------------------------------------------
+
+    def _take_grab(self):
+        try:
+            self.grab_set()
+        except Exception:
+            logger.debug("Could not take the grab for the key picker", exc_info=True)
+
+    def _close(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        parent = self.parent
+        self.destroy()
+        if self.picking and parent.winfo_exists():
+            try:
+                parent.grab_set()        # the dialog is modal again
+            except Exception:
+                pass
+            self.entry.focus_set()
+            self.entry.icursor('end')
+
+
 class AddMappingDialog(ctk.CTkToplevel):
     """Dialog to add or edit a key mapping"""
 
@@ -469,9 +726,10 @@ class AddMappingDialog(ctk.CTkToplevel):
         ctk.CTkLabel(body, text="Source Key (key to remap):", font=ctk.CTkFont(size=13)).pack(pady=(4, 4))
         source_frame = ctk.CTkFrame(body, fg_color="transparent")
         source_frame.pack(pady=4)
-        self.source_entry = ctk.CTkEntry(source_frame, width=290, placeholder_text="e.g., capslock, ctrl+a, f1, mouse4")
+        self.source_entry = ctk.CTkEntry(source_frame, width=250, placeholder_text="e.g., capslock, ctrl+a, f1, mouse4")
         self.source_entry.pack(side="left", padx=(0, 5))
         ctk.CTkButton(source_frame, text="🎯 Detect", command=self._detect_source, width=70).pack(side="left")
+        self._keys_button(source_frame, self.source_entry, "Source key", allow_source_only=True)
 
         # What it does
         ctk.CTkLabel(body, text="What should it do?", font=ctk.CTkFont(size=13)).pack(pady=(14, 4))
@@ -515,9 +773,10 @@ class AddMappingDialog(ctk.CTkToplevel):
         ctk.CTkLabel(frame, text="Target Key (what it becomes):", font=ctk.CTkFont(size=13)).pack(pady=(12, 4))
         target_frame = ctk.CTkFrame(frame, fg_color="transparent")
         target_frame.pack(pady=2)
-        self.target_entry = ctk.CTkEntry(target_frame, width=290, placeholder_text="e.g., escape, ctrl+c, mute, volumeup")
+        self.target_entry = ctk.CTkEntry(target_frame, width=250, placeholder_text="e.g., escape, ctrl+c, mute, volumeup")
         self.target_entry.pack(side="left", padx=(0, 5))
         ctk.CTkButton(target_frame, text="🎯 Detect", command=self._detect_target, width=70).pack(side="left")
+        self._keys_button(target_frame, self.target_entry, "Target key", allow_source_only=False)
 
         # Ready-made targets - volume, media, function keys and friends
         picker = ctk.CTkFrame(frame, fg_color="transparent")
@@ -545,9 +804,10 @@ class AddMappingDialog(ctk.CTkToplevel):
         ).pack(pady=(0, 4))
         hold_frame = ctk.CTkFrame(frame, fg_color="transparent")
         hold_frame.pack(pady=2)
-        self.hold_entry = ctk.CTkEntry(hold_frame, width=290, placeholder_text="e.g., ctrl, shift (leave empty for none)")
+        self.hold_entry = ctk.CTkEntry(hold_frame, width=250, placeholder_text="e.g., ctrl, shift (empty for none)")
         self.hold_entry.pack(side="left", padx=(0, 5))
         ctk.CTkButton(hold_frame, text="🎯 Detect", command=self._detect_hold, width=70).pack(side="left")
+        self._keys_button(hold_frame, self.hold_entry, "Hold key", allow_source_only=False)
 
     def _build_text_frame(self):
         """Literal characters, typed the same whatever the keyboard layout."""
@@ -776,6 +1036,17 @@ class AddMappingDialog(ctk.CTkToplevel):
             entry.delete(0, 'end')
             entry.insert(0, dialog.result)
 
+    def _keys_button(self, row, entry, field_name, allow_source_only):
+        """The ⌨ button: browse every key name and click to fill the field."""
+        ctk.CTkButton(
+            row, text="⌨", width=36, font=ctk.CTkFont(size=16),
+            fg_color=GRAY_BUTTON, hover_color=GRAY_BUTTON_HOVER,
+            command=lambda: KeyReferenceWindow(
+                self, entry=entry, field_name=field_name,
+                allow_source_only=allow_source_only
+            )
+        ).pack(side="left", padx=(5, 0))
+
     def _detect_source(self):
         """Open key detection dialog for source key"""
         self._detect_into(self.source_entry, "Detect Source Key")
@@ -888,9 +1159,14 @@ class BlockKeyDialog(ctk.CTkToplevel):
         ctk.CTkLabel(self, text="Key to Block:", font=ctk.CTkFont(size=13)).pack(pady=(10, 5))
         key_frame = ctk.CTkFrame(self, fg_color="transparent")
         key_frame.pack(pady=5)
-        self.key_entry = ctk.CTkEntry(key_frame, width=240, placeholder_text="e.g., /, win, alt+tab, f1")
+        self.key_entry = ctk.CTkEntry(key_frame, width=200, placeholder_text="e.g., /, win, alt+tab, f1")
         self.key_entry.pack(side="left", padx=(0, 5))
         ctk.CTkButton(key_frame, text="🎯 Detect", command=self._detect_key, width=60).pack(side="left")
+        ctk.CTkButton(
+            key_frame, text="⌨", width=36, font=ctk.CTkFont(size=16),
+            fg_color=GRAY_BUTTON, hover_color=GRAY_BUTTON_HOVER,
+            command=lambda: KeyReferenceWindow(self, entry=self.key_entry, field_name="Key to block")
+        ).pack(side="left", padx=(5, 0))
         
         # App scope
         ctk.CTkLabel(self, text="Only in this app (optional):", font=ctk.CTkFont(size=13)).pack(pady=(10, 4))
@@ -2078,78 +2354,14 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
                 messagebox.showerror("Error", "Failed to load configuration.")
     
     def _show_available_keys(self):
-        """Show available key names"""
-        keys_window = ctk.CTkToplevel(self)
-        keys_window.title("Available Key Names")
-        keys_window.geometry("500x400")
-        keys_window.transient(self)
-        
-        text = ctk.CTkTextbox(keys_window, font=ctk.CTkFont(family="Consolas", size=12))
-        text.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        content = """AVAILABLE KEY NAMES
-==================
+        """Open the key reference (or bring the open one forward)."""
+        window = getattr(self, '_keys_window', None)
+        if window is not None and window.winfo_exists():
+            window.lift()
+            window.focus_force()
+            return
+        self._keys_window = KeyReferenceWindow(self)
 
-LETTERS: a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z
-
-NUMBERS: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9
-
-FUNCTION KEYS: f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12
-EXTENDED FUNCTION KEYS: f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24
-
-NOTE: The Copilot key sends shift+win+f23 on nearly every laptop.
-      Use the "Copilot Key" tab - it detects the exact chord your
-      keyboard sends and handles the Start-menu side effects for you.
-
-MODIFIERS: ctrl, lctrl, rctrl, shift, lshift, rshift, alt, lalt, ralt, win, lwin, rwin
-
-THE Fn KEY: not supported as a modifier. Almost no keyboard
-      sends Fn to Windows - it is handled inside the keyboard,
-      which sends a different key for the combination instead.
-      So there is no "fn" you can type in a rule. Press the
-      WHOLE combination during 🎯 Detect (hold Fn, tap F12)
-      and whatever your keyboard really sends is recorded -
-      that is what you map. Fn key mapping is limited to this.
-
-NAVIGATION: up, down, left, right, home, end, pageup, pagedown
-
-SPECIAL KEYS: escape, esc, tab, capslock, caps, space, enter, return, backspace, delete, insert, apps (menu key)
-
-NUMPAD: num0-num9, numplus, numminus, nummultiply, numdivide, numdecimal
-
-MEDIA: playpause, nexttrack, prevtrack, mediastop, mute, volumeup, volumedown, calculator, mail, mediaselect, launchapp1, launchapp2, sleep
-
-BROWSER: browserback, browserforward, browserrefresh, browserhome, browsersearch, browserstop, browserfavorites
-
-RAW CODES: vk0x5D or vk93 - any key your keyboard sends that
-      has no friendly name. 🎯 Detect writes these for you.
-
-MOUSE (source only): mouse3 / middleclick, mouse4, mouse5
-      Left and right click cannot be remapped, and mouse
-      buttons cannot be used as a target.
-
-PUNCTUATION: semicolon (;), comma (,), period (.), slash (/), backslash (\\), quote ('), grave (`), lbracket ([), rbracket (]), minus (-), equals (=)
-
-COMBINATIONS:
-Use + to combine keys, e.g.:
-  ctrl+a
-  shift+f1
-  ctrl+shift+escape
-  alt+tab
-  win+shift+f23 (Copilot key)
-
-LAUNCHING APPS INSTEAD OF SENDING KEYS
-A mapping does not have to send keys. Set "What should it
-do?" to "Launch a program or app" and pick one, or paste:
-  calc.exe                     an executable on PATH
-  C:\\Tools\\thing.exe          a full path
-  ms-settings:                 a Windows settings page
-  shell:AppsFolder\\<app-id>    a Microsoft Store app
-"Open a website" takes any URL.
-"""
-        text.insert("1.0", content)
-        text.configure(state="disabled")
-    
     def _show_about(self):
         """Show About dialog with usage instructions and credits"""
         about_window = ctk.CTkToplevel(self)
@@ -2203,7 +2415,7 @@ GETTING STARTED
 ───────────────
   1. "Key Mappings" tab → "+ Add Mapping"
   2. Click 🎯 Detect and press the key you want to
-     change (or type its name)
+     change, or click ⌨ to pick it from the list
   3. Choose what it should do: send keys, type text,
      launch an app, or open a website
   4. Click "Add" — the rule is saved immediately
@@ -2312,6 +2524,12 @@ keystroke is intercepted until you do, so Windows-key
 and Copilot combinations are captured correctly. The
 dialog also shows the raw code your keyboard sent, and
 writes vk0x5D for keys that have no friendly name.
+
+Not sure what a key is called? Click ⌨ beside any key
+field: every key is listed by category, and clicking
+keys builds the entry for you - ctrl, then s, gives
+ctrl+s. "📋 Show Keys" opens the same list on its own;
+there, clicking a key copies its name.
 
 ⚠ THE Fn KEY — PLEASE READ
 ───────────────────────

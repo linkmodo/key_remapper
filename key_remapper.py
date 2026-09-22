@@ -65,7 +65,7 @@ INPUT_KEYBOARD = 1
 DUMMY_KEY = 0xFF
 
 APP_NAME = "KeyRemapper"
-__version__ = "2.5.0"
+__version__ = "2.5.1"
 
 # Where users can find the project and support it
 PROJECT_URL = "https://github.com/linkmodo/key_remapper"
@@ -422,6 +422,101 @@ COMMON_TARGETS: List[Tuple[str, List[Tuple[str, str]]]] = [
         ("Search", "browsersearch"),
     ]),
 ]
+
+
+# The key reference shown to users: every key name, grouped and explained.
+# Each entry is (name to type, what it is). Aliases - other names for the same
+# key - are worked out from KEY_NAME_TO_VK by key_reference(), and a test makes
+# sure every name the parser accepts appears here one way or the other.
+KEY_REFERENCE_GROUPS: List[Tuple[str, str, List[Tuple[str, str]]]] = [
+    ("Letters", "", [(c, c.upper()) for c in "abcdefghijklmnopqrstuvwxyz"]),
+    ("Numbers", "The number row. Numpad digits are listed separately.",
+     [(d, d) for d in "0123456789"]),
+    ("Function keys", "F13–F24 exist on few keyboards, but make good private shortcuts. "
+                      "The Copilot key sends shift+win+f23.",
+     [(f"f{n}", f"F{n}") for n in range(1, 25)]),
+    ("Modifiers", "ctrl / shift / alt / win match either side. Use the l- and r- names "
+                  "to remap one side only, e.g. ralt → ctrl.", [
+        ("ctrl", "Either Ctrl"), ("shift", "Either Shift"),
+        ("alt", "Either Alt"), ("win", "Windows key"),
+        ("lctrl", "Left Ctrl"), ("rctrl", "Right Ctrl"),
+        ("lshift", "Left Shift"), ("rshift", "Right Shift"),
+        ("lalt", "Left Alt"), ("ralt", "Right Alt (AltGr)"),
+        ("lwin", "Left Windows"), ("rwin", "Right Windows"),
+    ]),
+    ("Navigation", "", [
+        ("up", "Up arrow"), ("down", "Down arrow"),
+        ("left", "Left arrow"), ("right", "Right arrow"),
+        ("home", "Home"), ("end", "End"),
+        ("pageup", "Page Up"), ("pagedown", "Page Down"),
+        ("insert", "Insert"), ("delete", "Delete"),
+    ]),
+    ("Editing & special", "", [
+        ("escape", "Escape"), ("tab", "Tab"), ("capslock", "Caps Lock"),
+        ("space", "Space bar"), ("enter", "Enter"), ("backspace", "Backspace"),
+        ("apps", "Menu / context-menu key ▤"), ("printscreen", "Print Screen"),
+        ("scrolllock", "Scroll Lock"), ("pause", "Pause / Break"),
+    ]),
+    ("Punctuation", "These are key positions: what they type follows your keyboard "
+                    "layout. For a fixed character, use the “Type text” action.", [
+        ("period", ". period"), ("comma", ", comma"), ("semicolon", "; semicolon"),
+        ("quote", "' quote"), ("slash", "/ slash"), ("backslash", "\\ backslash"),
+        ("minus", "- minus"), ("equals", "= equals"), ("grave", "` backtick"),
+        ("lbracket", "[ left bracket"), ("rbracket", "] right bracket"),
+    ]),
+    ("Numpad", "", [
+        *[(f"num{d}", f"Numpad {d}") for d in range(10)],
+        ("numplus", "Numpad +"), ("numminus", "Numpad −"),
+        ("nummultiply", "Numpad ×"), ("numdivide", "Numpad ÷"),
+        ("numdecimal", "Numpad ."), ("numlock", "Num Lock"),
+    ]),
+    ("Volume & media", "", [
+        ("mute", "Mute"), ("volumeup", "Volume up"), ("volumedown", "Volume down"),
+        ("playpause", "Play / Pause"), ("nexttrack", "Next track"),
+        ("prevtrack", "Previous track"), ("mediastop", "Stop"),
+        ("mediaselect", "Media player key"), ("calculator", "Calculator key"),
+        ("mail", "Mail key"), ("launchapp1", "Launch app 1 (often This PC)"),
+        ("sleep", "Sleep"),
+    ]),
+    ("Browser", "", [
+        ("browserback", "Back"), ("browserforward", "Forward"),
+        ("browserrefresh", "Refresh"), ("browserhome", "Home page"),
+        ("browsersearch", "Search"), ("browserstop", "Stop loading"),
+        ("browserfavorites", "Favorites"),
+    ]),
+    ("Mouse buttons", "Source only: they can trigger a rule but can't be sent. "
+                      "Left and right click are deliberately not remappable.", [
+        ("mouse3", "Middle button (wheel click)"),
+        ("mouse4", "Side button — usually Back"),
+        ("mouse5", "Side button — usually Forward"),
+    ]),
+]
+
+
+def key_reference() -> List[Dict]:
+    """
+    The key reference, ready to display.
+
+    Returns one dict per group - ``title``, ``note`` and ``keys`` - where each
+    key has its ``name``, a readable ``label``, any ``aliases`` and whether it
+    may be used as a ``target`` (mouse buttons may not).
+    """
+    listed = {name for _, _, keys in KEY_REFERENCE_GROUPS for name, _ in keys}
+    groups = []
+    for title, note, keys in KEY_REFERENCE_GROUPS:
+        entries = []
+        for name, label in keys:
+            vk = int(KEY_NAME_TO_VK[name])
+            aliases = [other for other, code in KEY_NAME_TO_VK.items()
+                       if int(code) == vk and other != name and other not in listed]
+            entries.append({
+                "name": name,
+                "label": label,
+                "aliases": aliases,
+                "target": vk not in MOUSE_SOURCE_VKS,
+            })
+        groups.append({"title": title, "note": note, "keys": entries})
+    return groups
 
 
 # A combination is matched as (set-of-modifier-families, main key code)

@@ -885,6 +885,52 @@ class UnicodeInjectionTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+class KeyReferenceTests(unittest.TestCase):
+    """The key list users browse must match what the parser really accepts."""
+
+    def setUp(self):
+        self.reference = kr.key_reference()
+        self.keys = [key for group in self.reference for key in group['keys']]
+
+    def test_every_accepted_name_is_documented(self):
+        documented = {k['name'] for k in self.keys} | {a for k in self.keys for a in k['aliases']}
+        self.assertEqual(set(kr.KEY_NAME_TO_VK) - documented, set(),
+                         "a key name the parser accepts is missing from the reference")
+
+    def test_every_listed_name_parses(self):
+        remapper = FakeRemapper()
+        for key in self.keys:
+            with self.subTest(key=key['name']):
+                remapper.parse_key_string(key['name'])
+
+    def test_no_key_is_listed_twice(self):
+        names = [k['name'] for k in self.keys]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_every_key_has_a_readable_label(self):
+        for key in self.keys:
+            with self.subTest(key=key['name']):
+                self.assertTrue(key['label'].strip())
+
+    def test_aliases_point_at_the_same_key(self):
+        escape = next(k for k in self.keys if k['name'] == 'escape')
+        self.assertEqual(escape['aliases'], ['esc'])
+        self.assertEqual(kr.KEY_NAME_TO_VK['esc'], kr.KEY_NAME_TO_VK['escape'])
+
+    def test_listed_names_are_never_shown_as_aliases_of_each_other(self):
+        """win and lwin share a code, but both are listed in their own right."""
+        win = next(k for k in self.keys if k['name'] == 'win')
+        self.assertNotIn('lwin', win['aliases'])
+
+    def test_mouse_buttons_are_marked_source_only(self):
+        mouse = {k['name']: k['target'] for k in self.keys if k['name'].startswith('mouse')}
+        self.assertEqual(mouse, {'mouse3': False, 'mouse4': False, 'mouse5': False})
+        self.assertTrue(all(k['target'] for k in self.keys if not k['name'].startswith('mouse')))
+
+    def test_fn_is_not_offered(self):
+        self.assertNotIn('fn', {k['name'] for k in self.keys})
+
+
 class MappingActionTests(unittest.TestCase):
     """A key can open an app or a website instead of sending keys."""
 

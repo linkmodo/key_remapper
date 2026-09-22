@@ -3,21 +3,27 @@
 A free, robust keyboard key remapping tool for Windows 11 (also works on Windows 10).
 
 Easily customize and remap keys with dual purpose key-press separated by delayed release:
+
 <img width="584" height="506" alt="Screenshot 2026-09-22 092739" src="https://github.com/user-attachments/assets/7ae9b9cc-cdc3-4032-87db-f1825fc8ea77" />
 
 Block keys to prevent unintentional keypress:
+
 <img width="583" height="510" alt="Screenshot 2026-09-22 092848" src="https://github.com/user-attachments/assets/0a21861c-d65a-4594-9f82-c0a541bbb47b" />
 
 Complete Co-Pilot Key Remapping & Customization (Or disable forever):
+
 <img width="586" height="551" alt="Screenshot 2026-09-22 092901" src="https://github.com/user-attachments/assets/02cc619d-99ea-4217-bd30-53a4976926b7" />
 
 Option to auto-start at launch for uninterruped remapping and key blocking:
+
 <img width="582" height="635" alt="Screenshot 2026-09-22 092916" src="https://github.com/user-attachments/assets/81ecb5f4-b0b5-4928-8afc-354fe5a88873" />
 
 Easily visualize all available mapping options:
+
 <img width="480" height="682" alt="Screenshot 2026-09-22 092809" src="https://github.com/user-attachments/assets/3179efcf-df99-4eb7-9d1e-56607e0335d5" />
 
 Ignore keyboard layout to map special characters to modifier keys:
+
 <img width="375" height="530" alt="Screenshot 2026-09-21 185914" src="https://github.com/user-attachments/assets/ba9d31f5-8f9a-45db-bc74-fb94d2584b7a" />
 
 **Version 2.5.1** | Built by Li Fan, 2026

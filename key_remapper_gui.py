@@ -27,6 +27,7 @@ from key_remapper import (
     KeyRemapper, CONFIG_FILE, CONFIG_DIR, KEY_NAME_TO_VK, VK_TO_KEY_NAME,
     CopilotConfig, DEFAULT_COPILOT_KEY, Settings,
     COMMON_APPS, COMMON_TARGETS, vk_name, SingleInstance, key_reference,
+    MOUSE_TARGET_VKS, NO_SOURCE_VKS, MODIFIER_VKS,
     is_run_at_startup, set_run_at_startup, check_admin, logger,
     __version__, PROJECT_URL, DONATE_URL
 )
@@ -68,6 +69,9 @@ def _window_scaling(widget) -> float:
         return ctk.ScalingTracker.get_window_scaling(widget) or 1.0
     except Exception:
         return 1.0
+
+
+ROW_EVEN, ROW_ODD, ROW_SELECTED = "#363636", "#2b2b2b", "#1a5276"
 
 
 def _backup_folder() -> Path:
@@ -423,12 +427,13 @@ class KeyReferenceWindow(ctk.CTkToplevel):
     COLUMNS, CHIP_WIDTH = 5, 112
     COMPACT_COLUMNS, COMPACT_WIDTH = 10, 52
 
-    def __init__(self, parent, entry=None, field_name: str = "", allow_source_only: bool = True):
+    def __init__(self, parent, entry=None, field_name: str = "", field_kind: str = "source"):
         super().__init__(parent)
         self.parent = parent
         self.entry = entry
         self.picking = entry is not None
-        self.allow_source_only = allow_source_only
+        # "source" fields refuse left/right click; "target" fields take anything
+        self.field_kind = field_kind
         self._filter_id = None
 
         self.title(f"Choose keys — {field_name}" if self.picking else "Available Keys")
@@ -524,7 +529,7 @@ class KeyReferenceWindow(ctk.CTkToplevel):
 
             chips = []
             for key in group["keys"]:
-                usable = key["target"] or self.allow_source_only or not self.picking
+                usable = (not self.picking) or key.get(self.field_kind, True)
                 chip = ctk.CTkButton(
                     grid, text=key["name"], width=width, height=28,
                     font=ctk.CTkFont(family="Consolas", size=12),
@@ -606,7 +611,8 @@ class KeyReferenceWindow(ctk.CTkToplevel):
         if key["aliases"]:
             text += "      also accepted: " + ", ".join(key["aliases"])
         if not usable:
-            text += "      (mouse buttons can only be a source)"
+            text += ("      (left and right click can be sent by a rule, "
+                     "but never remapped away)")
         self.info_label.configure(text=text)
 
     # --- clicking keys -------------------------------------------------
@@ -740,7 +746,7 @@ class AddMappingDialog(ctk.CTkToplevel):
         self.source_entry = ctk.CTkEntry(source_frame, width=250, placeholder_text="e.g., capslock, ctrl+a, f1, mouse4")
         self.source_entry.pack(side="left", padx=(0, 5))
         ctk.CTkButton(source_frame, text="🎯 Detect", command=self._detect_source, width=70).pack(side="left")
-        self._keys_button(source_frame, self.source_entry, "Source key", allow_source_only=True)
+        self._keys_button(source_frame, self.source_entry, "Source key", field_kind="source")
 
         # What it does
         ctk.CTkLabel(body, text="What should it do?", font=ctk.CTkFont(size=13)).pack(pady=(14, 4))
@@ -787,7 +793,7 @@ class AddMappingDialog(ctk.CTkToplevel):
         self.target_entry = ctk.CTkEntry(target_frame, width=250, placeholder_text="e.g., escape, ctrl+c, mute, volumeup")
         self.target_entry.pack(side="left", padx=(0, 5))
         ctk.CTkButton(target_frame, text="🎯 Detect", command=self._detect_target, width=70).pack(side="left")
-        self._keys_button(target_frame, self.target_entry, "Target key", allow_source_only=False)
+        self._keys_button(target_frame, self.target_entry, "Target key", field_kind="target")
 
         # Ready-made targets - volume, media, function keys and friends
         picker = ctk.CTkFrame(frame, fg_color="transparent")
@@ -818,7 +824,7 @@ class AddMappingDialog(ctk.CTkToplevel):
         self.hold_entry = ctk.CTkEntry(hold_frame, width=250, placeholder_text="e.g., ctrl, shift (empty for none)")
         self.hold_entry.pack(side="left", padx=(0, 5))
         ctk.CTkButton(hold_frame, text="🎯 Detect", command=self._detect_hold, width=70).pack(side="left")
-        self._keys_button(hold_frame, self.hold_entry, "Hold key", allow_source_only=False)
+        self._keys_button(hold_frame, self.hold_entry, "Hold key", field_kind="target")
 
     def _build_text_frame(self):
         """Literal characters, typed the same whatever the keyboard layout."""
@@ -1040,6 +1046,45 @@ class AddMappingDialog(ctk.CTkToplevel):
         if description.lower() != auto:
             self.desc_entry.insert(0, description)
 
+    def _confirm_mouse_target(self, source: str, target: str, hold: str) -> bool:
+        """
+        Warn before a rule is set to press a mouse button.
+
+        A click behaves differently from a keystroke, and giving up a modifier
+        key to get one costs that modifier - worth saying before the rule is
+        saved rather than after it surprises someone.
+        """
+        try:
+            sent = self.remapper.parse_key_string(target) if target.strip() else ()
+            sent += self.remapper.parse_key_string(hold) if hold.strip() else ()
+            source_keys = self.remapper.parse_key_string(source)
+        except ValueError:
+            return True                      # a bad key name is reported later
+
+        clicks = [vk_name(vk) for vk in sent if vk in MOUSE_TARGET_VKS]
+        if not clicks:
+            return True
+
+        lines = [
+            f"This rule presses {' and '.join(clicks)} instead of sending a key.",
+            "",
+            "\u2022 The button follows the key: hold the key and the button stays "
+            "down, so you can drag.",
+            "\u2022 Your real mouse keeps working \u2014 left and right click can never "
+            "be remapped away.",
+            "\u2022 Some games read the mouse directly and may ignore a click sent "
+            "this way.",
+        ]
+        if all(vk in MODIFIER_VKS for vk in source_keys):
+            lines += [
+                "",
+                f"\u26a0 {source.upper()} is a modifier. While this rule is on it "
+                "stops working as one, so combinations that use it "
+                "(capital letters, shortcuts) will not work on that key.",
+            ]
+        lines += ["", "Add this rule?"]
+        return messagebox.askyesno("Mapping a key to a mouse click", "\n".join(lines))
+
     def _detect_into(self, entry, title):
         dialog = KeyCaptureDialog(self, title)
         self.wait_window(dialog)
@@ -1047,14 +1092,13 @@ class AddMappingDialog(ctk.CTkToplevel):
             entry.delete(0, 'end')
             entry.insert(0, dialog.result)
 
-    def _keys_button(self, row, entry, field_name, allow_source_only):
+    def _keys_button(self, row, entry, field_name, field_kind):
         """The ⌨ button: browse every key name and click to fill the field."""
         ctk.CTkButton(
             row, text="⌨", width=36, font=ctk.CTkFont(size=16),
             fg_color=GRAY_BUTTON, hover_color=GRAY_BUTTON_HOVER,
             command=lambda: KeyReferenceWindow(
-                self, entry=entry, field_name=field_name,
-                allow_source_only=allow_source_only
+                self, entry=entry, field_name=field_name, field_kind=field_kind
             )
         ).pack(side="left", padx=(5, 0))
 
@@ -1096,6 +1140,9 @@ class AddMappingDialog(ctk.CTkToplevel):
                 "text": "Please enter the text to type.",
                 "launch": "Please choose a program to launch.",
             }.get(action, "Please enter a website address."))
+            return
+
+        if not self._confirm_mouse_target(source, target, hold):
             return
 
         ignore = None
@@ -1419,11 +1466,39 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             hover_color=GRAY_BUTTON_HOVER
         ).pack(side="left", padx=5)
 
-        ctk.CTkLabel(
+        self.mapping_clear_btn = ctk.CTkButton(
+            toolbar,
+            text="\u2716 Clear selection",
+            command=self._clear_mapping_selection,
+            width=130,
+            fg_color=GRAY_BUTTON,
+            hover_color=GRAY_BUTTON_HOVER,
+            state="disabled"
+        )
+        self.mapping_clear_btn.pack(side="left", padx=5)
+
+        self.mapping_count_label = ctk.CTkLabel(
+            toolbar, text="", font=ctk.CTkFont(size=12), text_color="#5dade2"
+        )
+        self.mapping_count_label.pack(side="left", padx=8)
+
+        # Shown only while Settings -> "Blocked keys only" is on, because then
+        # none of these rules do anything
+        self.mapping_blocks_only_banner = ctk.CTkLabel(
             self.tab_mappings,
-            text="Double-click a row to edit it.",
+            text="\u26a0 \u201cBlocked keys only\u201d is on in Settings \u2014 every mapping "
+                 "below is ignored. Untick it in Settings to use them again.",
+            font=ctk.CTkFont(size=12), text_color="#f39c12",
+            anchor="w", justify="left"
+        )
+
+        self.mapping_hint_label = ctk.CTkLabel(
+            self.tab_mappings,
+            text="Click rows to select them \u2014 click again to deselect. "
+                 "Double-click a row to edit it.",
             font=ctk.CTkFont(size=11), text_color="gray"
-        ).pack(anchor="w", pady=(0, 4))
+        )
+        self.mapping_hint_label.pack(anchor="w", pady=(0, 4))
 
         # Scrollable frame for mappings
         self.mappings_frame = AutoHideScrollableFrame(self.tab_mappings)
@@ -1442,7 +1517,9 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         ctk.CTkLabel(header, text="Description", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=10)
 
         self.mapping_widgets = []
-        self.selected_mapping = None
+        # Rows the user has clicked, in click order. Several at a time, so a
+        # batch of rules can be removed or toggled in one go.
+        self.selected_mappings = []
     
     def _create_blocked_tab(self):
         """Create the blocked keys tab content"""
@@ -1479,14 +1556,36 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         ).pack(side="left", padx=5)
         
         ctk.CTkButton(
-            toolbar, 
-            text="Toggle On/Off", 
+            toolbar,
+            text="Toggle On/Off",
             command=self._toggle_blocked,
             width=130,
             fg_color=GRAY_BUTTON,
             hover_color=GRAY_BUTTON_HOVER
         ).pack(side="left", padx=5)
-        
+
+        self.blocked_clear_btn = ctk.CTkButton(
+            toolbar,
+            text="\u2716 Clear selection",
+            command=self._clear_blocked_selection,
+            width=130,
+            fg_color=GRAY_BUTTON,
+            hover_color=GRAY_BUTTON_HOVER,
+            state="disabled"
+        )
+        self.blocked_clear_btn.pack(side="left", padx=5)
+
+        self.blocked_count_label = ctk.CTkLabel(
+            toolbar, text="", font=ctk.CTkFont(size=12), text_color="#5dade2"
+        )
+        self.blocked_count_label.pack(side="left", padx=8)
+
+        ctk.CTkLabel(
+            self.tab_blocked,
+            text="Click rows to select them \u2014 click again to deselect.",
+            font=ctk.CTkFont(size=11), text_color="gray"
+        ).pack(anchor="w", pady=(0, 4))
+
         # Scrollable frame for blocked keys
         self.blocked_frame = AutoHideScrollableFrame(self.tab_blocked)
         self.blocked_frame.pack(fill="both", expand=True)
@@ -1501,7 +1600,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         ctk.CTkLabel(header, text="Description", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=10)
         
         self.blocked_widgets = []
-        self.selected_blocked = None
+        self.selected_blocked_rows = []
     
     # ------------------------------------------------------------------
     # Copilot key tab
@@ -1687,11 +1786,17 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             self.copilot_value_entry.insert(0, copilot.value)
 
         self._on_copilot_mode_change(self.copilot_mode_menu.get())
-        self.copilot_status_label.configure(
-            text=f"Current: {copilot.action_text()}" if copilot.enabled
-            else "Current: the Copilot key is left untouched.",
-            text_color="#27ae60" if copilot.enabled else "gray"
-        )
+        blocks_only = self.remapper.settings.blocks_only
+        if copilot.enabled and blocks_only:
+            status, colour = (
+                f"Current: {copilot.action_text()}\n"
+                "\u26a0 Ignored while \u201cBlocked keys only\u201d is on in Settings.",
+                "#f39c12")
+        elif copilot.enabled:
+            status, colour = f"Current: {copilot.action_text()}", "#27ae60"
+        else:
+            status, colour = "Current: the Copilot key is left untouched.", "gray"
+        self.copilot_status_label.configure(text=status, text_color=colour)
 
     def _on_copilot_mode_change(self, label: str):
         """Show the right input for the selected action"""
@@ -1902,6 +2007,25 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         self.timeout_label = ctk.CTkLabel(timeout_frame, text=f"{settings.tap_timeout_ms} ms", width=70)
         self.timeout_label.pack(side="left")
 
+        # --- What the remapper does ---
+        ctk.CTkLabel(
+            tab, text="What Key Remapper does", font=ctk.CTkFont(size=13, weight="bold")
+        ).pack(anchor="w", padx=10)
+        ctk.CTkLabel(
+            tab,
+            text="Normally it does everything you have set up. Tick this to use it purely as a\n"
+                 "key blocker: every blocked key keeps working, and every mapping \u2014 including\n"
+                 "the Copilot key action \u2014 is ignored. Nothing is deleted, so unticking it\n"
+                 "brings your mappings straight back.",
+            font=ctk.CTkFont(size=11), text_color="gray", justify="left"
+        ).pack(anchor="w", padx=10, pady=(0, 4))
+
+        self.blocks_only_var = ctk.BooleanVar(value=settings.blocks_only)
+        ctk.CTkCheckBox(
+            tab, text="Blocked keys only \u2014 ignore all key mappings",
+            variable=self.blocks_only_var
+        ).pack(anchor="w", padx=14, pady=(4, 14))
+
         # --- Startup behaviour ---
         ctk.CTkLabel(
             tab, text="Startup", font=ctk.CTkFont(size=13, weight="bold")
@@ -2053,6 +2177,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             start_on_launch=bool(self.autostart_var.get()),
             type_text_enabled=bool(self.type_text_var.get()),
             numpad_ignores_shift=bool(self.numpad_var.get()),
+            blocks_only=bool(self.blocks_only_var.get()),
         )
 
         if not self.remapper.apply_settings(settings):
@@ -2070,6 +2195,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
 
         self.remapper.save_config()
         self._refresh_mappings()
+        self._refresh_copilot()
         self.settings_status_label.configure(
             text="Saved. " + (f"Press {settings.toggle_hotkey} to pause or resume."
                               if settings.toggle_hotkey else "No pause hotkey set."),
@@ -2094,6 +2220,7 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
         self.autostart_var.set(settings.start_on_launch)
         self.type_text_var.set(settings.type_text_enabled)
         self.numpad_var.set(settings.numpad_ignores_shift)
+        self.blocks_only_var.set(settings.blocks_only)
 
     def _reset_all(self):
         """Wipe every rule and setting after confirming"""
@@ -2154,25 +2281,35 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             self._refresh_copilot()
     
     def _refresh_mappings(self):
-        """Refresh the mappings list"""
-        # Clear existing widgets
+        """Refresh the mappings list, keeping whatever is still selected"""
+        # Rows are rebuilt from scratch, so remember the selection by rule
+        was_selected = {self._mapping_id(r.mapping) for r in self.selected_mappings}
+
         for widget in self.mapping_widgets:
             widget.destroy()
         self.mapping_widgets.clear()
-        self.selected_mapping = None
-        
+        self.selected_mappings = []
+
+        blocks_only = self.remapper.settings.blocks_only
+        if blocks_only:
+            self.mapping_blocks_only_banner.pack(
+                anchor="w", pady=(0, 4), before=self.mapping_hint_label)
+        else:
+            self.mapping_blocks_only_banner.pack_forget()
+
         # Add mappings
         mappings = self.remapper.list_mappings()
         for i, m in enumerate(mappings):
-            row = ctk.CTkFrame(self.mappings_frame, fg_color="#363636" if i % 2 == 0 else "#2b2b2b", corner_radius=5)
+            row = ctk.CTkFrame(self.mappings_frame, fg_color=ROW_EVEN if i % 2 == 0 else ROW_ODD, corner_radius=5)
             row.pack(fill="x", pady=2)
             row.mapping = m
             row.mapping_source = m['source']
 
             # Status indicator
-            # A text rule is also inert while typing is switched off in Settings
-            paused_by_switch = (m['action'] == "text"
-                                and not self.remapper.settings.type_text_enabled)
+            # A rule is inert while typing is switched off, and every rule is
+            # inert in "Blocked keys only" mode
+            paused_by_switch = blocks_only or (
+                m['action'] == "text" and not self.remapper.settings.type_text_enabled)
             status_color = "#27ae60" if m['enabled'] and not paused_by_switch else "#7f8c8d"
             status = ctk.CTkLabel(row, text="●", width=30, text_color=status_color)
             status.pack(side="left", padx=5)
@@ -2209,22 +2346,28 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
                 child.bind("<Double-Button-1>", lambda e, r=row: self._edit_mapping(r))
 
             self.mapping_widgets.append(row)
+            if self._mapping_id(m) in was_selected:
+                self.selected_mappings.append(row)
+                row.configure(fg_color=ROW_SELECTED)
+
+        self._refresh_mapping_selection_ui()
 
         # Rows were added/removed, so the scrollbar may no longer be needed
         self.after(60, self.mappings_frame._refresh_scrollbar)
     
     def _refresh_blocked(self):
-        """Refresh the blocked keys list"""
-        # Clear existing widgets
+        """Refresh the blocked keys list, keeping whatever is still selected"""
+        was_selected = {(r.blocked_key, r.blocked_app) for r in self.selected_blocked_rows}
+
         for widget in self.blocked_widgets:
             widget.destroy()
         self.blocked_widgets.clear()
-        self.selected_blocked = None
-        
+        self.selected_blocked_rows = []
+
         # Add blocked keys
         blocked = self.remapper.list_blocked_keys()
         for i, b in enumerate(blocked):
-            row = ctk.CTkFrame(self.blocked_frame, fg_color="#363636" if i % 2 == 0 else "#2b2b2b", corner_radius=5)
+            row = ctk.CTkFrame(self.blocked_frame, fg_color=ROW_EVEN if i % 2 == 0 else ROW_ODD, corner_radius=5)
             row.pack(fill="x", pady=2)
             row.blocked_key = b['key']
             row.blocked_app = b['app']
@@ -2250,30 +2393,99 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
                 child.bind("<Button-1>", lambda e, r=row: self._select_blocked(r))
             
             self.blocked_widgets.append(row)
+            if (b['key'], b['app']) in was_selected:
+                self.selected_blocked_rows.append(row)
+                row.configure(fg_color=ROW_SELECTED)
 
+        self._refresh_blocked_selection_ui()
         self.after(60, self.blocked_frame._refresh_scrollbar)
     
-    def _select_mapping(self, row):
-        """Select a mapping row"""
-        # Deselect previous
-        if self.selected_mapping:
-            idx = self.mapping_widgets.index(self.selected_mapping) if self.selected_mapping in self.mapping_widgets else 0
-            self.selected_mapping.configure(fg_color="#363636" if idx % 2 == 0 else "#2b2b2b")
-        
-        # Select new
-        self.selected_mapping = row
-        row.configure(fg_color="#1a5276")
-    
-    def _select_blocked(self, row):
-        """Select a blocked key row"""
-        # Deselect previous
-        if self.selected_blocked:
-            idx = self.blocked_widgets.index(self.selected_blocked) if self.selected_blocked in self.blocked_widgets else 0
-            self.selected_blocked.configure(fg_color="#363636" if idx % 2 == 0 else "#2b2b2b")
-        
-        # Select new
-        self.selected_blocked = row
-        row.configure(fg_color="#1a5276")
+    @staticmethod
+    def _mapping_id(mapping: dict):
+        """What identifies a rule across a redraw: its source key and app."""
+        return (mapping['source'], mapping['app'])
+
+    @staticmethod
+    def _stripe(widgets, row):
+        """The row's normal colour, from its position in the list."""
+        index = widgets.index(row) if row in widgets else 0
+        return ROW_EVEN if index % 2 == 0 else ROW_ODD
+
+    def _select_mapping(self, row, only: bool = False):
+        """
+        Add a mapping row to the selection, or take it out again.
+
+        Clicking rows one after another builds up a selection; clicking a
+        selected row removes it. ``only`` replaces the selection with this row
+        (used by double-click, which edits exactly that rule).
+        """
+        if only:
+            for other in list(self.selected_mappings):
+                if other is not row:
+                    other.configure(fg_color=self._stripe(self.mapping_widgets, other))
+            self.selected_mappings = [row]
+            row.configure(fg_color=ROW_SELECTED)
+        elif row in self.selected_mappings:
+            self.selected_mappings.remove(row)
+            row.configure(fg_color=self._stripe(self.mapping_widgets, row))
+        else:
+            self.selected_mappings.append(row)
+            row.configure(fg_color=ROW_SELECTED)
+        self._refresh_mapping_selection_ui()
+
+    def _clear_mapping_selection(self):
+        for row in self.selected_mappings:
+            if row.winfo_exists():
+                row.configure(fg_color=self._stripe(self.mapping_widgets, row))
+        self.selected_mappings = []
+        self._refresh_mapping_selection_ui()
+
+    def _refresh_mapping_selection_ui(self):
+        count = len(self.selected_mappings)
+        self.mapping_count_label.configure(text=f"{count} selected" if count else "")
+        self.mapping_clear_btn.configure(state="normal" if count else "disabled")
+
+    def _select_blocked(self, row, only: bool = False):
+        """Same selection behaviour as the mappings list."""
+        if only:
+            for other in list(self.selected_blocked_rows):
+                if other is not row:
+                    other.configure(fg_color=self._stripe(self.blocked_widgets, other))
+            self.selected_blocked_rows = [row]
+            row.configure(fg_color=ROW_SELECTED)
+        elif row in self.selected_blocked_rows:
+            self.selected_blocked_rows.remove(row)
+            row.configure(fg_color=self._stripe(self.blocked_widgets, row))
+        else:
+            self.selected_blocked_rows.append(row)
+            row.configure(fg_color=ROW_SELECTED)
+        self._refresh_blocked_selection_ui()
+
+    def _clear_blocked_selection(self):
+        for row in self.selected_blocked_rows:
+            if row.winfo_exists():
+                row.configure(fg_color=self._stripe(self.blocked_widgets, row))
+        self.selected_blocked_rows = []
+        self._refresh_blocked_selection_ui()
+
+    def _refresh_blocked_selection_ui(self):
+        count = len(self.selected_blocked_rows)
+        self.blocked_count_label.configure(text=f"{count} selected" if count else "")
+        self.blocked_clear_btn.configure(state="normal" if count else "disabled")
+
+    @staticmethod
+    def _scope(app: str) -> str:
+        return f" in {app}" if app else ""
+
+    @staticmethod
+    def _listed(names, limit: int = 8) -> str:
+        """'A, B and 3 more' - for confirmations about a batch."""
+        names = list(names)
+        if len(names) > limit:
+            return ", ".join(names[:limit]) + f" and {len(names) - limit} more"
+        if len(names) > 1:
+            return ", ".join(names[:-1]) + f" and {names[-1]}"
+        return names[0] if names else ""
     
     def _add_mapping(self):
         """Open dialog to add a mapping"""
@@ -2285,12 +2497,20 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
     
     def _edit_mapping(self, row=None):
         """Edit the selected (or double-clicked) mapping"""
-        row = row or self.selected_mapping
-        if not row:
-            messagebox.showwarning("Warning", "Please select a mapping to edit.")
-            return
+        if row is None:
+            if len(self.selected_mappings) != 1:
+                messagebox.showwarning(
+                    "Select one mapping",
+                    "Editing works on a single mapping.\n\n"
+                    + ("Select the one you want to edit."
+                       if not self.selected_mappings else
+                       f"{len(self.selected_mappings)} are selected \u2014 click "
+                       "\u2716 Clear selection, then pick one.")
+                )
+                return
+            row = self.selected_mappings[0]
 
-        self._select_mapping(row)
+        self._select_mapping(row, only=True)
         dialog = AddMappingDialog(self, self.remapper, existing=row.mapping)
         self.wait_window(dialog)
         if dialog.result:
@@ -2298,28 +2518,34 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             self.remapper.save_config()
 
     def _remove_mapping(self):
-        """Remove selected mapping"""
-        if not self.selected_mapping:
-            messagebox.showwarning("Warning", "Please select a mapping to remove.")
+        """Remove every selected mapping"""
+        rules = [row.mapping for row in self.selected_mappings]
+        if not rules:
+            messagebox.showwarning("Warning", "Please select one or more mappings to remove.")
             return
 
-        mapping = self.selected_mapping.mapping
-        source, app = mapping['source'], mapping['app']
-        scope = f" in {app}" if app else ""
-        if messagebox.askyesno("Confirm", f"Remove mapping for '{source}'{scope}?"):
-            self.remapper.remove_mapping(source, app)
-            self._refresh_mappings()
-            self.remapper.save_config()
+        described = self._listed(m['source'] + self._scope(m['app']) for m in rules)
+        question = (f"Remove the mapping for {described}?" if len(rules) == 1
+                    else f"Remove these {len(rules)} mappings?\n\n{described}")
+        if not messagebox.askyesno("Confirm", question):
+            return
+
+        for mapping in rules:
+            self.remapper.remove_mapping(mapping['source'], mapping['app'])
+        self._clear_mapping_selection()
+        self._refresh_mappings()
+        self.remapper.save_config()
 
     def _toggle_mapping(self):
-        """Toggle selected mapping"""
-        if not self.selected_mapping:
-            messagebox.showwarning("Warning", "Please select a mapping to toggle.")
+        """Turn every selected mapping on or off"""
+        rules = [row.mapping for row in self.selected_mappings]
+        if not rules:
+            messagebox.showwarning("Warning", "Please select one or more mappings to toggle.")
             return
 
-        mapping = self.selected_mapping.mapping
-        self.remapper.toggle_mapping(mapping['source'], mapping['app'])
-        self._refresh_mappings()
+        for mapping in rules:
+            self.remapper.toggle_mapping(mapping['source'], mapping['app'])
+        self._refresh_mappings()          # keeps them selected, ready to toggle back
         self.remapper.save_config()
     
     def _block_key(self):
@@ -2331,28 +2557,33 @@ class KeyRemapperGUI(UiQueueMixin, ctk.CTk):
             self.remapper.save_config()
     
     def _unblock_key(self):
-        """Unblock selected key"""
-        if not self.selected_blocked:
-            messagebox.showwarning("Warning", "Please select a key to unblock.")
+        """Unblock every selected key"""
+        keys = [(row.blocked_key, row.blocked_app) for row in self.selected_blocked_rows]
+        if not keys:
+            messagebox.showwarning("Warning", "Please select one or more keys to unblock.")
             return
-        
-        key = self.selected_blocked.blocked_key
-        app = self.selected_blocked.blocked_app
-        scope = f" in {app}" if app else ""
-        if messagebox.askyesno("Confirm", f"Unblock key '{key}'{scope}?"):
+
+        described = self._listed(key + self._scope(app) for key, app in keys)
+        question = (f"Unblock {described}?" if len(keys) == 1
+                    else f"Unblock these {len(keys)} keys?\n\n{described}")
+        if not messagebox.askyesno("Confirm", question):
+            return
+
+        for key, app in keys:
             self.remapper.unblock_key(key, app)
-            self._refresh_blocked()
-            self.remapper.save_config()
-    
+        self._clear_blocked_selection()
+        self._refresh_blocked()
+        self.remapper.save_config()
+
     def _toggle_blocked(self):
-        """Toggle selected blocked key"""
-        if not self.selected_blocked:
-            messagebox.showwarning("Warning", "Please select a blocked key to toggle.")
+        """Turn every selected block on or off"""
+        keys = [(row.blocked_key, row.blocked_app) for row in self.selected_blocked_rows]
+        if not keys:
+            messagebox.showwarning("Warning", "Please select one or more blocked keys to toggle.")
             return
-        
-        self.remapper.toggle_blocked_key(
-            self.selected_blocked.blocked_key, self.selected_blocked.blocked_app
-        )
+
+        for key, app in keys:
+            self.remapper.toggle_blocked_key(key, app)
         self._refresh_blocked()
         self.remapper.save_config()
     
@@ -2523,6 +2754,7 @@ that ignore ordinary remapping tools.
 
 A key can:
   • Become any other key or combination
+  • Press a mouse button
   • Type text that ignores your keyboard layout
   • Launch a program, app, file or website
   • Send volume, media and browser keys
@@ -2550,8 +2782,8 @@ THE FOUR TABS
   Key Mappings  turn keys into other keys or actions
   Blocked Keys  disable keys outright
   Copilot Key   repurpose the dedicated Copilot key
-  Settings      pause hotkey, startup, typing, gaming,
-                reset
+  Settings      what it does, pause hotkey, startup,
+                typing, gaming, reset
 
 KEY MAPPINGS
 ────────────
@@ -2560,8 +2792,13 @@ Examples:
   • F1 → Ctrl+S (quick save)
   • F9 → Mute, F10/F11 → Volume down/up
   • Mouse4 → Ctrl+C (side button copies)
-Double-click any row later to edit it, or select it
-and use "Remove Selected" / "Toggle On/Off".
+Double-click any row to edit it.
+
+Click rows to select them, and click again to deselect.
+Select as many as you like, then use "Remove Selected"
+or "Toggle On/Off" on all of them at once. The count is
+shown beside the buttons, and "\u2716 Clear selection"
+starts over. Editing works on one mapping at a time.
 
 LAUNCH AN APP FROM A KEY
 ──────────────────────
@@ -2605,6 +2842,47 @@ Completely disable keys to prevent accidental presses:
   • Block "/" to stop chat opening mid-game
   • Block "win" so you never minimise a fullscreen game
   • Block "escape" to avoid the pause menu
+
+Rows here select the same way as mappings: click to
+select, click again to deselect, then unblock or toggle
+the whole selection in one go.
+
+A KEY AS A MOUSE BUTTON
+───────────────────────
+A rule can press a mouse button instead of sending a
+key - for example Right Shift as a right click:
+
+  rshift  →  rightclick
+  lshift  →  leftclick
+  f13     →  mouse4
+
+The button follows the key, so holding the key holds
+the button down and you can drag with it.
+
+Left and right click can be SENT by a rule but never
+remapped away, so clicking always works even if a rule
+goes wrong. Middle and the side buttons work both ways.
+
+Two things to know, which the app also warns about when
+you add such a rule:
+  • Giving up a modifier (Shift, Ctrl, Alt) costs you
+    that modifier - no capital letters or shortcuts on
+    that key while the rule is on. Map lshift or rshift
+    on its own and keep the other for normal use.
+  • Some games read the mouse directly and may ignore a
+    click sent this way.
+
+BLOCKED KEYS ONLY
+─────────────────
+Settings \u2192 "Blocked keys only" turns Key Remapper into
+a pure key blocker: every blocked key keeps working and
+every mapping is ignored, including the Copilot key
+action. Nothing is deleted, so unticking it brings your
+mappings straight back.
+
+Useful if you only want keys disabled while gaming but
+keep mappings for everyday work. While it is on, the Key
+Mappings tab says so and its rows are greyed out.
 
 COPILOT KEY
 ───────────
@@ -2708,7 +2986,7 @@ SUPPORTED KEYS
   • Modifiers: ctrl, shift, alt, win
   • Special: escape, tab, space, enter, apps, etc.
   • Media: playpause, mute, volumeup, calculator, ...
-  • Mouse: mouse3, mouse4, mouse5 (as a source)
+  • Mouse: leftclick, rightclick, mouse3, mouse4, mouse5
   • Raw codes: vk0x5D, for keys with no name
   • Combinations: ctrl+a, win+shift+f23, etc.
 See "📋 Show Keys" for the full list.

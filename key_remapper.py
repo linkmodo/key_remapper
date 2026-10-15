@@ -59,14 +59,25 @@ KEYEVENTF_SCANCODE = 0x0008
 KEYEVENTF_EXTENDEDKEY = 0x0001
 
 # Input type
+INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
+
+# Mouse events we can send (a key mapped to a click)
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_MIDDLEDOWN = 0x0020
+MOUSEEVENTF_MIDDLEUP = 0x0040
+MOUSEEVENTF_XDOWN = 0x0080
+MOUSEEVENTF_XUP = 0x0100
 
 # Unassigned virtual key used to "consume" a held Windows key so that releasing
 # it does not pop the Start menu after we swallowed the real key press.
 DUMMY_KEY = 0xFF
 
 APP_NAME = "KeyRemapper"
-__version__ = "2.6.0"
+__version__ = "2.7.0"
 
 # Where users can find the project and support it
 PROJECT_URL = "https://github.com/linkmodo/key_remapper"
@@ -312,15 +323,36 @@ KEY_NAME_TO_VK: Dict[str, int] = {
     'browserrefresh': VirtualKey.VK_BROWSER_REFRESH, 'browserhome': VirtualKey.VK_BROWSER_HOME,
     'browsersearch': VirtualKey.VK_BROWSER_SEARCH, 'browserstop': VirtualKey.VK_BROWSER_STOP,
     'browserfavorites': VirtualKey.VK_BROWSER_FAVORITES,
-    # Mouse buttons usable as a *source* only. Left and right are deliberately
-    # absent: remapping them can leave you unable to click your way out.
+    # Mouse buttons. Middle and the two side buttons work both ways - as the
+    # key that triggers a rule, and as what a rule sends. Left and right click
+    # can only be *sent*: a rule that swallowed them could leave you unable to
+    # click your way out of it.
     'middleclick': VirtualKey.VK_MBUTTON, 'mouse3': VirtualKey.VK_MBUTTON,
     'mouse4': VirtualKey.VK_XBUTTON1, 'mouse5': VirtualKey.VK_XBUTTON2,
+    'mouse1': VirtualKey.VK_LBUTTON, 'leftclick': VirtualKey.VK_LBUTTON,
+    'mouse2': VirtualKey.VK_RBUTTON, 'rightclick': VirtualKey.VK_RBUTTON,
 }
 
 # Sources handled by the mouse hook rather than the keyboard hook
 MOUSE_SOURCE_VKS: Set[int] = {
     int(VirtualKey.VK_MBUTTON), int(VirtualKey.VK_XBUTTON1), int(VirtualKey.VK_XBUTTON2)
+}
+
+# Buttons a rule can *send*: the ones above plus left and right click
+MOUSE_TARGET_VKS: Set[int] = MOUSE_SOURCE_VKS | {
+    int(VirtualKey.VK_LBUTTON), int(VirtualKey.VK_RBUTTON)
+}
+
+# ...and the two that may never trigger a rule, so clicking always works
+NO_SOURCE_VKS: Set[int] = {int(VirtualKey.VK_LBUTTON), int(VirtualKey.VK_RBUTTON)}
+
+# How each button is pressed and released through SendInput
+MOUSE_EVENTS: Dict[int, Tuple[int, int, int]] = {
+    int(VirtualKey.VK_LBUTTON): (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0),
+    int(VirtualKey.VK_RBUTTON): (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
+    int(VirtualKey.VK_MBUTTON): (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
+    int(VirtualKey.VK_XBUTTON1): (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON1),
+    int(VirtualKey.VK_XBUTTON2): (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON2),
 }
 
 # Reverse mapping
@@ -488,11 +520,14 @@ KEY_REFERENCE_GROUPS: List[Tuple[str, str, List[Tuple[str, str]]]] = [
         ("browsersearch", "Search"), ("browserstop", "Stop loading"),
         ("browserfavorites", "Favorites"),
     ]),
-    ("Mouse buttons", "Source only: they can trigger a rule but can't be sent. "
-                      "Left and right click are deliberately not remappable.", [
+    ("Mouse buttons", "Middle and the side buttons work both ways. Left and right click "
+                      "can only be sent by a rule, never remapped away - so clicking always "
+                      "works.", [
         ("mouse3", "Middle button (wheel click)"),
         ("mouse4", "Side button — usually Back"),
         ("mouse5", "Side button — usually Forward"),
+        ("leftclick", "Left click — can be sent, not remapped"),
+        ("rightclick", "Right click — can be sent, not remapped"),
     ]),
 ]
 
@@ -517,7 +552,9 @@ def key_reference() -> List[Dict]:
                 "name": name,
                 "label": label,
                 "aliases": aliases,
-                "target": vk not in MOUSE_SOURCE_VKS,
+                # Which side of a rule this key may be used on
+                "source": vk not in NO_SOURCE_VKS,
+                "target": True,
             })
         groups.append({"title": title, "note": note, "keys": entries})
     return groups
@@ -749,6 +786,9 @@ class Settings:
     # Off by default - outside games, Shift+Numpad-arrow selecting text is
     # exactly what people expect.
     numpad_ignores_shift: bool = False
+    # Blocking only: keep every blocked key working and ignore all remapping
+    # (mappings and the Copilot key action). The rules are kept, not deleted.
+    blocks_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -858,6 +898,7 @@ def settings_from_dict(data: Optional[Dict]) -> Settings:
         start_on_launch=bool(data.get("start_on_launch", False)),
         type_text_enabled=bool(data.get("type_text_enabled", True)),
         numpad_ignores_shift=bool(data.get("numpad_ignores_shift", False)),
+        blocks_only=bool(data.get("blocks_only", False)),
     )
 
 
@@ -1195,10 +1236,10 @@ class KeyRemapper:
                 logger.warning("Hold actions only work on single keys, not combinations")
                 return False
 
-            # Mouse buttons are read from the mouse hook; SendInput cannot press
-            # them as keyboard events, so they are sources only
-            if any(vk in MOUSE_SOURCE_VKS for vk in target_keys + hold_keys):
-                logger.warning("Mouse buttons can only be used as a source, not a target")
+            # Left and right click always keep working: a rule can send them,
+            # but never swallow them
+            if any(vk in NO_SOURCE_VKS for vk in source_keys):
+                logger.warning("Left and right click cannot be remapped away")
                 return False
 
             mapping = KeyMapping(
@@ -1272,6 +1313,10 @@ class KeyRemapper:
         try:
             key_codes = self.parse_key_string(key)
             app = self.normalize_app(app)
+
+            if any(vk in NO_SOURCE_VKS for vk in key_codes):
+                logger.warning("Left and right click cannot be blocked")
+                return False
 
             blocked = BlockedKey(
                 key=key_codes,
@@ -1406,6 +1451,10 @@ class KeyRemapper:
 
     def has_work(self) -> bool:
         """True when starting the hook would change anything."""
+        if self.settings.blocks_only:
+            # Mappings and the Copilot action are ignored in this mode, so they
+            # are no reason to install a hook
+            return bool(self.blocked_keys or self.settings.numpad_ignores_shift)
         return bool(self.mappings or self.blocked_keys or self.copilot.enabled
                     or self.settings.numpad_ignores_shift)
 
@@ -1445,7 +1494,11 @@ class KeyRemapper:
                 logger.exception("Pause callback failed")
 
     def _send_key(self, vk_code: int, key_up: bool = False):
-        """Send a single key event using SendInput"""
+        """Send a single key (or mouse button) event using SendInput"""
+        if vk_code in MOUSE_TARGET_VKS:
+            self._send_mouse_button(vk_code, key_up)
+            return
+
         flags = 0
         if key_up:
             flags |= KEYEVENTF_KEYUP
@@ -1465,6 +1518,27 @@ class KeyRemapper:
         
         user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
     
+    def _send_mouse_button(self, vk_code: int, key_up: bool = False):
+        """
+        Press or release a mouse button.
+
+        A click is a different kind of event from a keystroke, so it cannot go
+        through the keyboard path. Press and release follow the physical key,
+        which is what makes "hold the key to drag" work.
+        """
+        down, up, which = MOUSE_EVENTS[vk_code]
+
+        event = INPUT()
+        event.type = INPUT_MOUSE
+        event.union.mi.dx = 0
+        event.union.mi.dy = 0
+        event.union.mi.mouseData = which
+        event.union.mi.dwFlags = up if key_up else down
+        event.union.mi.time = 0
+        event.union.mi.dwExtraInfo = self._injection_marker
+
+        user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(INPUT))
+
     def _send_text(self, text: str):
         """
         Type literal characters, independent of the keyboard layout.
@@ -1897,8 +1971,12 @@ class KeyRemapper:
         if self.state.pending_dual and vk_code not in self.state.pending_dual:
             self._commit_dual_holds()
 
+        # "Blocked keys only": everything that *replaces* a key steps aside,
+        # so only blocking is left. The rules themselves are untouched.
+        blocks_only = self.settings.blocks_only
+
         # 1. Copilot key
-        if self._copilot_matches(vk_code, families):
+        if not blocks_only and self._copilot_matches(vk_code, families):
             self.state.suppressed_keys[vk_code] = self._trigger_copilot(families)
             return True
 
@@ -1918,6 +1996,9 @@ class KeyRemapper:
         if (mapping is not None and mapping.action == "text"
                 and not self.settings.type_text_enabled):
             mapping = None
+
+        if blocks_only:
+            return False
 
         # 3. Remapped keys
         if mapping is not None and mapping.enabled:
@@ -2132,7 +2213,7 @@ class KeyRemapper:
             copilot = self.copilot
             settings = self.settings
             config = {
-                "version": 7,
+                "version": 8,
                 "mappings": [
                     {
                         "source": self.vk_to_string(m.source_keys),
@@ -2163,6 +2244,7 @@ class KeyRemapper:
                     "start_on_launch": settings.start_on_launch,
                     "type_text_enabled": settings.type_text_enabled,
                     "numpad_ignores_shift": settings.numpad_ignores_shift,
+                    "blocks_only": settings.blocks_only,
                 },
                 "copilot": {
                     "enabled": copilot.enabled,
@@ -2499,7 +2581,8 @@ def print_available_keys():
                   'volumeup', 'volumedown', 'calculator', 'mail', 'mediaselect',
                   'launchapp1', 'launchapp2', 'sleep'],
         "Browser": [k for k in KEY_NAME_TO_VK.keys() if k.startswith('browser')],
-        "Mouse (source only)": ['mouse3', 'middleclick', 'mouse4', 'mouse5'],
+        "Mouse": ['mouse3', 'middleclick', 'mouse4', 'mouse5',
+                  'leftclick', 'mouse1', 'rightclick', 'mouse2'],
     }
     
     for category, keys in categories.items():

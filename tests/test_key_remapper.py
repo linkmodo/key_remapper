@@ -215,9 +215,10 @@ class MouseHookTests(unittest.TestCase):
         result = self.remapper._mouse_callback(0, kr.WM_MBUTTONDOWN, kr.ctypes.pointer(struct))
         self.assertNotEqual(result, 1)
 
-    def test_mouse_button_rejected_as_a_target(self):
-        self.assertFalse(self.remapper.add_mapping('f13', 'mouse4'))
-        self.assertFalse(self.remapper.add_mapping('f13', 'a', hold='mouse5'))
+    def test_mouse_buttons_may_be_sent(self):
+        """Since v2.7 a rule can press a button as well as be triggered by one."""
+        self.assertTrue(self.remapper.add_mapping('f13', 'mouse4'))
+        self.assertTrue(self.remapper.add_mapping('f14', 'a', hold='mouse5'))
 
     def test_mouse_source_combines_with_keyboard_modifiers(self):
         self.remapper.add_mapping('ctrl+mouse4', 'a')
@@ -930,10 +931,12 @@ class KeyReferenceTests(unittest.TestCase):
         win = next(k for k in self.keys if k['name'] == 'win')
         self.assertNotIn('lwin', win['aliases'])
 
-    def test_mouse_buttons_are_marked_source_only(self):
-        mouse = {k['name']: k['target'] for k in self.keys if k['name'].startswith('mouse')}
-        self.assertEqual(mouse, {'mouse3': False, 'mouse4': False, 'mouse5': False})
-        self.assertTrue(all(k['target'] for k in self.keys if not k['name'].startswith('mouse')))
+    def test_every_key_can_be_sent(self):
+        self.assertTrue(all(k['target'] for k in self.keys))
+
+    def test_only_left_and_right_click_are_barred_as_a_source(self):
+        barred = {k['name'] for k in self.keys if not k['source']}
+        self.assertEqual(barred, {'leftclick', 'rightclick'})
 
     def test_fn_is_not_offered(self):
         self.assertNotIn('fn', {k['name'] for k in self.keys})
@@ -1259,6 +1262,232 @@ class LoadValidationTests(unittest.TestCase):
         self.assertEqual(self.remapper.list_mappings(), [])
 
 
+class BlocksOnlyTests(unittest.TestCase):
+    """
+    "Blocked keys only": keep every block working, ignore every remap.
+
+    For people who want the app purely as a key blocker - typically while
+    gaming - without deleting the mappings they use the rest of the time.
+    """
+
+    def setUp(self):
+        self.remapper = FakeRemapper()
+        self.remapper.add_mapping('f13', 'a')
+        self.remapper.block_key('f14')
+        self.remapper.set_copilot(kr.CopilotConfig(enabled=True, mode='keys', value='ralt'))
+        self.on()
+
+    def on(self, blocks_only=True):
+        self.remapper.apply_settings(kr.Settings(blocks_only=blocks_only))
+
+    def test_blocked_keys_still_work(self):
+        self.assertTrue(self.remapper.down(int(kr.VirtualKey.VK_F14)))
+        self.assertTrue(self.remapper.up(int(kr.VirtualKey.VK_F14)))
+
+    def test_mappings_are_ignored(self):
+        self.assertFalse(self.remapper.down(F13), "the key does its normal job")
+        self.assertEqual(self.remapper.sent, [])
+
+    def test_the_mapping_is_kept_not_deleted(self):
+        self.assertEqual(len(self.remapper.list_mappings()), 1)
+
+    def test_unticking_brings_mappings_straight_back(self):
+        self.on(False)
+        self.assertTrue(self.remapper.down(F13))
+        self.assertEqual(self.remapper.sent, [(KEY_A, 'down')])
+
+    def test_the_copilot_action_is_ignored_too(self):
+        """It replaces a key press, so it counts as remapping."""
+        self.remapper.down(LSHIFT)
+        self.remapper.down(LWIN)
+        self.assertFalse(self.remapper.down(F23))
+        self.assertEqual(self.remapper.sent, [])
+
+    def test_launch_and_text_rules_are_ignored(self):
+        self.remapper.add_mapping('f15', '', action='launch', value='calc.exe')
+        self.remapper.add_mapping('f16', '', action='text', value='.')
+        self.assertFalse(self.remapper.down(int(kr.VirtualKey.VK_F15)))
+        self.assertFalse(self.remapper.down(int(kr.VirtualKey.VK_F16)))
+        self.assertEqual(self.remapper.actions, [])
+        self.assertEqual(self.remapper.typed, [])
+
+    def test_dual_role_keys_are_ignored(self):
+        self.remapper.add_mapping('capslock', 'escape', hold='ctrl')
+        self.assertFalse(self.remapper.down(CAPS))
+        self.assertEqual(self.remapper.sent, [])
+
+    def test_the_pause_hotkey_still_works(self):
+        self.remapper.apply_settings(kr.Settings(blocks_only=True, toggle_hotkey='ctrl+alt+f12'))
+        self.remapper.down(LCTRL)
+        self.remapper.down(int(kr.VirtualKey.VK_LMENU))
+        self.assertTrue(self.remapper.down(int(kr.VirtualKey.VK_F12)))
+        self.assertTrue(self.remapper.paused)
+
+    def test_the_numpad_fix_still_works(self):
+        self.remapper.apply_settings(kr.Settings(blocks_only=True, numpad_ignores_shift=True))
+        self.remapper.down(LSHIFT, 0x02A)
+        self.remapper._handle_key_event(LSHIFT, False, True, 0x22A)      # fake release
+        self.assertTrue(self.remapper.down(int(kr.VirtualKey.VK_UP), 0x048))
+        self.assertIn((int(kr.VirtualKey.VK_NUMPAD8), 'down'), self.remapper.sent)
+
+    def test_blocks_still_apply_per_app(self):
+        self.remapper.block_key('f17', app='game.exe')
+        foreground = ['notepad.exe']
+        self.remapper._foreground_exe = lambda: foreground[0]
+        self.assertFalse(self.remapper.down(int(kr.VirtualKey.VK_F17)))
+        foreground[0] = 'game.exe'
+        self.assertTrue(self.remapper.down(int(kr.VirtualKey.VK_F17)))
+
+    # --- when is there anything to do? ------------------------------------
+
+    def test_mappings_alone_are_no_reason_to_start(self):
+        plain = FakeRemapper()
+        plain.add_mapping('f13', 'a')
+        plain.apply_settings(kr.Settings(blocks_only=True))
+        self.assertFalse(plain.has_work())
+
+    def test_a_block_is_reason_to_start(self):
+        self.assertTrue(self.remapper.has_work())
+
+    def test_off_by_default_and_saved(self):
+        self.assertFalse(kr.Settings().blocks_only)
+        self.assertFalse(kr.settings_from_dict({}).blocks_only)
+
+        path = Path(tempfile.mkdtemp()) / "blocks.json"
+        self.remapper.save_config(path)
+        loaded = FakeRemapper()
+        loaded.load_config(path)
+        self.assertTrue(loaded.settings.blocks_only)
+
+
+class MouseTargetTests(unittest.TestCase):
+    """
+    A key can press a mouse button - e.g. Right Shift as a right click.
+
+    Left and right click can be *sent* but never remapped away, so clicking is
+    always available to get out of a rule that went wrong.
+    """
+
+    LSHIFT, RSHIFT = int(kr.VirtualKey.VK_LSHIFT), int(kr.VirtualKey.VK_RSHIFT)
+    LEFT, RIGHT = int(kr.VirtualKey.VK_LBUTTON), int(kr.VirtualKey.VK_RBUTTON)
+    MIDDLE, X1 = int(kr.VirtualKey.VK_MBUTTON), int(kr.VirtualKey.VK_XBUTTON1)
+
+    def setUp(self):
+        self.remapper = FakeRemapper()
+
+    def test_left_shift_sends_a_left_click(self):
+        self.assertTrue(self.remapper.add_mapping('lshift', 'leftclick'))
+        self.assertTrue(self.remapper.down(self.LSHIFT))
+        self.assertEqual(self.remapper.sent, [(self.LEFT, 'down')])
+
+    def test_holding_the_key_holds_the_button_down(self):
+        """What makes dragging work: the button follows the key."""
+        self.remapper.add_mapping('rshift', 'rightclick')
+        self.remapper.down(self.RSHIFT)
+        self.assertEqual(self.remapper.sent, [(self.RIGHT, 'down')])
+
+        self.assertTrue(self.remapper.up(self.RSHIFT))
+        self.assertEqual(self.remapper.sent[-1], (self.RIGHT, 'up'))
+
+    def test_side_and_middle_buttons_can_be_sent_too(self):
+        self.remapper.add_mapping('f13', 'mouse3')
+        self.remapper.add_mapping('f14', 'mouse4')
+        self.remapper.down(F13)
+        self.remapper.down(int(kr.VirtualKey.VK_F14))
+        self.assertEqual(self.remapper.sent, [(self.MIDDLE, 'down'), (self.X1, 'down')])
+
+    def test_a_click_can_be_part_of_a_combination(self):
+        self.remapper.add_mapping('f13', 'ctrl+leftclick')
+        self.remapper.down(F13)
+        self.assertEqual(self.remapper.sent,
+                         [(int(kr.VirtualKey.VK_CONTROL), 'down'), (self.LEFT, 'down')])
+
+    def test_a_click_works_as_the_hold_role(self):
+        self.assertTrue(self.remapper.add_mapping('capslock', 'escape', hold='leftclick'))
+
+    def test_left_and_right_click_cannot_trigger_a_rule(self):
+        self.assertFalse(self.remapper.add_mapping('leftclick', 'a'))
+        self.assertFalse(self.remapper.add_mapping('rightclick', 'a'))
+        self.assertFalse(self.remapper.add_mapping('ctrl+leftclick', 'a'))
+
+    def test_left_and_right_click_cannot_be_blocked(self):
+        self.assertFalse(self.remapper.block_key('leftclick'))
+        self.assertFalse(self.remapper.block_key('rightclick'))
+        self.assertEqual(self.remapper.list_blocked_keys(), [])
+
+    def test_the_other_buttons_still_trigger_rules(self):
+        self.assertTrue(self.remapper.add_mapping('mouse4', 'ctrl+c'))
+        self.assertTrue(self.remapper.block_key('mouse3'))
+
+    def test_a_click_target_alone_needs_no_mouse_hook(self):
+        """The hook watches for button *presses*; sending needs no hook."""
+        self.remapper.add_mapping('lshift', 'leftclick')
+        self.assertFalse(self.remapper._needs_mouse_hook)
+
+    def test_names_for_the_buttons(self):
+        parse = self.remapper.parse_key_string
+        self.assertEqual(parse('leftclick'), parse('mouse1'))
+        self.assertEqual(parse('rightclick'), parse('mouse2'))
+        self.assertEqual(parse('middleclick'), parse('mouse3'))
+
+    def test_click_rules_survive_a_save(self):
+        path = Path(tempfile.mkdtemp()) / "clicks.json"
+        self.remapper.add_mapping('lshift', 'leftclick')
+        self.remapper.add_mapping('rshift', 'rightclick')
+        self.remapper.save_config(path)
+
+        loaded = FakeRemapper()
+        self.assertTrue(loaded.load_config(path))
+        self.assertEqual(loaded.list_mappings(), self.remapper.list_mappings())
+
+
+class MouseSendingTests(unittest.TestCase):
+    """The real _send_key, with SendInput captured instead of called."""
+
+    def setUp(self):
+        self.calls = []
+        self.original = kr.user32.SendInput
+
+        def capture(count, events, size):
+            # byref() hands over a CArgObject; the structure is behind _obj
+            event = events._obj if hasattr(events, '_obj') else events[0]
+            self.calls.append((event.type,
+                               event.union.mi.dwFlags,
+                               event.union.mi.mouseData,
+                               event.union.mi.dwExtraInfo))
+            return count
+
+        kr.user32.SendInput = capture
+        self.addCleanup(self._restore)
+        self.remapper = kr.KeyRemapper()
+
+    def _restore(self):
+        kr.user32.SendInput = self.original
+
+    def test_left_click_is_a_mouse_event_not_a_keystroke(self):
+        self.remapper._send_key(int(kr.VirtualKey.VK_LBUTTON))
+        kind, flags, data, marker = self.calls[0]
+        self.assertEqual(kind, kr.INPUT_MOUSE)
+        self.assertEqual(flags, kr.MOUSEEVENTF_LEFTDOWN)
+        self.assertEqual(marker, self.remapper._injection_marker,
+                         "tagged as ours, so our own hook ignores it")
+
+    def test_release_sends_the_matching_up_event(self):
+        self.remapper._send_key(int(kr.VirtualKey.VK_RBUTTON), key_up=True)
+        self.assertEqual(self.calls[0][1], kr.MOUSEEVENTF_RIGHTUP)
+
+    def test_side_buttons_say_which_one(self):
+        self.remapper._send_key(int(kr.VirtualKey.VK_XBUTTON1))
+        self.remapper._send_key(int(kr.VirtualKey.VK_XBUTTON2))
+        self.assertEqual([(flags, data) for _, flags, data, _ in self.calls],
+                         [(kr.MOUSEEVENTF_XDOWN, kr.XBUTTON1),
+                          (kr.MOUSEEVENTF_XDOWN, kr.XBUTTON2)])
+
+    def test_ordinary_keys_still_go_through_the_keyboard(self):
+        self.remapper._send_key(F13)
+        self.assertEqual(self.calls[0][0], kr.INPUT_KEYBOARD)
+
+
 class MappingActionTests(unittest.TestCase):
     """A key can open an app or a website instead of sending keys."""
 
@@ -1428,6 +1657,7 @@ class ConfigTests(unittest.TestCase):
             'toggle_hotkey': 'ctrl+alt+f12', 'tap_timeout_ms': 175,
             'run_at_startup': True, 'start_minimized': True, 'start_on_launch': True,
             'type_text_enabled': True, 'numpad_ignores_shift': False,
+            'blocks_only': False,
         })
 
         # And it all comes back

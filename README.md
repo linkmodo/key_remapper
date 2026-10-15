@@ -20,7 +20,7 @@ Easily visualize all available mapping options:
 Ignore keyboard layout to map special characters to modifier keys:
 <br><img width="375" height="530" alt="Screenshot 2026-09-21 185914" src="https://github.com/user-attachments/assets/ba9d31f5-8f9a-45db-bc74-fb94d2584b7a" />
 
-**Version 2.6** | Built by Li Fan, 2026
+**Version 2.7** | Built by Li Fan, 2026
 
 📥 **Download**: Grab `KeyRemapper.exe` from the
 [latest release](https://github.com/linkmodo/key_remapper/releases/latest) — a single file, no
@@ -30,6 +30,21 @@ Runs as a normal user. Administrator rights are only needed if you want it to af
 windows that themselves run elevated (some games, Task Manager, etc.).
 
 > *Created out of frustration at being unable to disable or remap keys within a particular game.*
+
+## ✨ What's New in Version 2.7
+
+- **Select several rules at once** — click rows in Key Mappings or Blocked Keys to build up a
+  selection (click again to deselect), then **Remove Selected** or **Toggle On/Off** acts on all
+  of them. The toolbar shows how many are selected and has a **✖ Clear selection** button.
+  See [Selecting several rules](#-selecting-several-rules)
+- **Blocked keys only** — a Settings option that keeps every blocked key working and ignores
+  every mapping, for using the app purely as a key blocker without deleting your mappings.
+  See [Blocked keys only](#-blocked-keys-only)
+- **A key can press a mouse button** — `rshift` → `rightclick`, `lshift` → `leftclick`,
+  `f13` → `mouse4`. Hold the key and the button stays down, so dragging works. Left and right
+  click can be sent but never remapped away, so clicking always works.
+  See [A key as a mouse button](#-a-key-as-a-mouse-button)
+- **195 unit tests**, up from 166
 
 ## ✨ What's New in Version 2.6
 
@@ -481,6 +496,64 @@ It is exact rather than a guess:
 > *Run as administrator*). The Settings tab shows whether it currently is. Some games and
 > anti-cheat systems block keyboard hooks altogether; there, this option cannot work.
 
+### 🖱 A key as a mouse button
+
+A rule can press a mouse button instead of sending a key:
+
+| Source | Target | Result |
+|--------|--------|--------|
+| `rshift` | `rightclick` | Right Shift right-clicks |
+| `lshift` | `leftclick` | Left Shift left-clicks |
+| `f13` | `mouse4` | F13 acts as the Back side button |
+
+The button follows the key: hold the key and the button stays held, so you can drag with it.
+
+**Left and right click can be sent, but never remapped away.** They are refused as a source and
+cannot be blocked, so clicking is always available to undo a rule that misbehaves. Middle click
+and the two side buttons work in both directions, as a source and as a target.
+
+Key Remapper warns before saving such a rule, because two things surprise people:
+
+- **A modifier used this way stops being a modifier.** With `rshift` → `rightclick`, that Shift
+  no longer makes capitals or shortcuts. Map one side only and keep the other for normal use.
+- **Some games read the mouse directly** and may ignore a click sent by software, the same
+  caveat as other remaps.
+
+Names: `leftclick`/`mouse1`, `rightclick`/`mouse2`, `middleclick`/`mouse3`, `mouse4`, `mouse5`.
+
+### ✔ Selecting several rules
+
+Rows in **Key Mappings** and **Blocked Keys** can be selected together:
+
+- **Click** a row to select it; **click it again** to deselect.
+- Keep clicking to add more. The toolbar shows **"3 selected"**, and **✖ Clear selection**
+  empties the selection.
+- **Remove Selected** / **Unblock Selected** and **Toggle On/Off** act on everything selected.
+  Removing asks first and names what will go.
+- **Double-click** a row to edit it. Editing works on one rule at a time, so if several are
+  selected, Edit asks you to narrow it down.
+
+Toggling keeps the selection, so you can switch a group of rules off and back on without
+re-picking them.
+
+### 🚫 Blocked keys only
+
+**Settings → What Key Remapper does → "Blocked keys only — ignore all key mappings"**
+
+Keeps every **blocked key** working and ignores every **mapping**, including the Copilot key
+action. Your rules are kept, not deleted, so unticking the option brings them straight back.
+
+It is for using the app as a pure key blocker — for example, disabling `/`, `win` and `escape`
+while gaming — without losing the mappings you use the rest of the time.
+
+While it is on:
+
+- the **Key Mappings** tab shows a notice and greys out its rows, each marked *(off)*
+- the **Copilot Key** tab says its action is being ignored
+- **▶ Start** needs at least one blocked key, since mappings alone would now do nothing
+
+The pause hotkey and the Gaming numpad option are unaffected — neither replaces a key.
+
 ### Per-app profiles
 
 Leave **Only in this app** empty and a rule applies everywhere. Fill in an executable name
@@ -568,7 +641,8 @@ click **⌨** beside any key field to pick names from a searchable list.
 | Media | `playpause`, `nexttrack`, `prevtrack`, `mediastop`, `mute`, `volumeup`, `volumedown`, `calculator`, `mail`, `mediaselect`, `launchapp1`, `launchapp2`, `sleep` |
 | Browser | `browserback`, `browserforward`, `browserrefresh`, `browserhome`, `browsersearch`, `browserstop`, `browserfavorites` |
 | Raw codes | `vk0x5D` / `vk93` — any key with no friendly name |
-| Mouse (source only) | `mouse3` / `middleclick`, `mouse4`, `mouse5` |
+| Mouse | `mouse3` / `middleclick`, `mouse4`, `mouse5` — as a source or a target |
+| Mouse (target only) | `leftclick` / `mouse1`, `rightclick` / `mouse2` — can be sent, never remapped away |
 | Punctuation | `semicolon`, `comma`, `period`, `slash`, `backslash`, `quote`, `grave`, `lbracket`, `rbracket` |
 
 Modifiers are matched by family: a mapping written as `ctrl+a` fires for either Ctrl key.
@@ -604,7 +678,7 @@ Everything is saved to `%APPDATA%\KeyRemapper\key_remap_config.json`:
 
 ```json
 {
-    "version": 7,
+    "version": 8,
     "mappings": [
         {
             "source": "CAPSLOCK",
@@ -660,14 +734,16 @@ Everything is saved to `%APPDATA%\KeyRemapper\key_remap_config.json`:
         "start_minimized": false,
         "start_on_launch": false,
         "type_text_enabled": true,
-        "numpad_ignores_shift": false
+        "numpad_ignores_shift": false,
+        "blocks_only": false
     }
 }
 ```
 
 A mapping's `action` is `keys` (send `target`), `text` (type `value` literally), or
 `launch` / `url` (open `value`). `type_text_enabled` is the Settings switch for text rules, and `numpad_ignores_shift`
-the Gaming option for Shift+Numpad.
+the Gaming option for Shift+Numpad. `blocks_only` keeps blocks working and ignores every
+mapping.
 Copilot `mode` is one of `disable`, `keys`, `launch`, `url` or `passthrough`.
 Older config files load unchanged — missing fields and sections fall back to defaults.
 
@@ -677,11 +753,11 @@ Older config files load unchanged — missing fields and sections fall back to d
 python -m unittest discover -s tests
 ```
 
-166 tests drive the rule engine directly (no real hooks, no keyboard input needed), covering
+195 tests drive the rule engine directly(no real hooks, no keyboard input needed), covering
 remaps, blocks, per-app scoping, dual-role keys, the pause hotkey, the Copilot chord, the mouse
 hook, app-launching mappings, layout-independent text (including the exact `SendInput`
 events it produces), raw key codes, the key reference, Shift+Numpad correction (replaying event sequences
-recorded from Windows), the single-instance guard and config
+recorded from Windows), blocks-only mode, mouse-button targets, the single-instance guard and config
 round-tripping — including that configs written by earlier versions still load.
 
 ## Troubleshooting
@@ -779,8 +855,8 @@ it is hidden reopens the window rather than starting a second copy.
 
 - Windows only (uses Windows-specific APIs)
 - Some games with kernel-level anti-cheat may not work
-- Left and right mouse buttons are deliberately not remappable, and mouse buttons
-  cannot be a target
+- Left and right mouse buttons are deliberately not remappable (they can be *sent* by a
+  rule, but never intercepted), so clicking always works
 - Cannot remap keys used by Windows itself (e.g., Ctrl+Alt+Del)
 - **The Fn key cannot be used as a modifier.** Virtually no keyboard reports it to
   Windows; map what the combination actually sends instead ([why](#-the-fn-key))

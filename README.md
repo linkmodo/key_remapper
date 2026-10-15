@@ -261,6 +261,7 @@ Fair. You have three options, in order of paranoia:
 
    | Release | SHA-256 |
    |---------|---------|
+   | v2.7.0 | `774a49218da6fd4ed99a914426f027c2476fbb0f087ec8ca99f717263951be31` |
    | v2.6.0 | `e0daa4a3baf758e2f374a8922347d546557b2b4046cd4d0e361f9a94f5f577ea` |
    | v2.5.1 | `32f4f100586954ee5db25c2165b7d7b380eb7a9ce799d9f1f89061524287bf1e` |
    | v2.5.0 | `e8f3a50413c93744e3cc36e0f9957dc637adb942d1a468cdd1b1044ad94b2f55` |
